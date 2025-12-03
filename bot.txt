@@ -1,0 +1,4209 @@
+/**
+ * 澳门六合彩预测机器人 (Macau Mark Six Prediction Bot)
+ * 版本: V5.0 Enterprise Complete Edition (修复版)
+ * 修复: 频道消息不触发AI助手，避免无限循环
+ * 
+ * ==============================================================================
+ * 核心功能清单:
+ * 1. 确定性预测引擎 (Deterministic Prediction Engine)
+ *    - 基于马尔可夫链 (Markov Chain)
+ *    - 基于遗漏值回归 (Omission Regression)
+ *    - 基于加权移动平均 (Weighted Moving Average)
+ * 2. 时光机复盘系统 (Time-Machine Backtesting)
+ *    - 支持回滚至任意历史期数
+ *    - 模拟当时的预测环境
+ *    - 自动对比真实结果
+ * 3. 自主学习进化系统 (Self-Evolution Learning)
+ *    - 预测失败自动分析原因
+ *    - 动态调整算法权重参数
+ *    - 参数持久化存储
+ * 4. 系统管理功能
+ *    - 历史数据从 URL 同步
+ *    - 定时自动推送（完整实现）
+ *    - 战绩统计与归档
+ *    - AI 助手集成
+ * 5. 完整用户界面
+ *    - Telegram Bot 全功能菜单
+ *    - 实时交互反馈
+ *    - 多状态管理
+ * ==============================================================================
+ */
+
+// ==============================================================================
+// 1. 全局配置与常量定义 (Global Configuration & Constants)
+// ==============================================================================
+
+const CONFIG = {
+  // 系统基础设置
+  SYSTEM: {
+    NAME: "🇲🇴 新澳六合彩·天机",
+    VERSION: "V5.0 Enterprise Complete (修复版)",
+    DEFAULT_DURATION: 3 * 60 * 60 * 1000, // 默认计算时长
+    TARGET_SIMS: 5000000,                 // 目标模拟次数
+    BATCH_SIZE: 50000,                    // 每次执行批次
+    AI_MODEL: "@cf/meta/llama-3-8b-instruct",
+    TIMEZONE_OFFSET: 8,                   // UTC+8 北京时间
+    CHANNEL_ID: null,                     // 从环境变量获取
+    ADMIN_ID: null                        // 从环境变量获取
+  },
+
+  // 初始算法权重
+  DEFAULT_ALGO_WEIGHTS: {
+    w_freq: 1.0,      // 基础频率权重
+    w_markov: 2.5,    // 马尔可夫转移权重
+    w_omission: 0.8,  // 遗漏偏离权重
+    w_relation: 1.5,  // 生肖关系权重
+    w_color: 1.0,     // 波色权重
+    w_tail: 1.0,      // 尾数权重
+    w_shape: 0.8      // 形态权重
+  },
+
+  // 生肖映射表
+  ZODIAC_MAP: {
+    "蛇": [1, 13, 25, 37, 49],
+    "龙": [2, 14, 26, 38],
+    "兔": [3, 15, 27, 39],
+    "虎": [4, 16, 28, 40],
+    "牛": [5, 17, 29, 41],
+    "鼠": [6, 18, 30, 42],
+    "猪": [7, 19, 31, 43],
+    "狗": [8, 20, 32, 44],
+    "鸡": [9, 21, 33, 45],
+    "猴": [10, 22, 34, 46],
+    "羊": [11, 23, 35, 47],
+    "马": [12, 24, 36, 48]
+  },
+
+  // 五行/关系定义
+  RELATIONS: {
+    // 六合：互相贵人，强关联
+    LIU_HE: {
+      "鼠": "牛", "牛": "鼠", "虎": "猪", "猪": "虎", "兔": "狗", "狗": "兔",
+      "龙": "鸡", "鸡": "龙", "蛇": "猴", "猴": "蛇", "马": "羊", "羊": "马"
+    },
+    // 三合：明合，运势相生
+    SAN_HE: {
+      "鼠": ["龙", "猴"], "牛": ["蛇", "鸡"], "虎": ["马", "狗"], "兔": ["羊", "猪"],
+      "龙": ["鼠", "猴"], "蛇": ["牛", "鸡"], "马": ["虎", "狗"], "羊": ["兔", "猪"],
+      "猴": ["鼠", "龙"], "鸡": ["牛", "蛇"], "狗": ["虎", "马"], "猪": ["兔", "羊"]
+    },
+    // 相冲：对立关系
+    CHONG: {
+      "鼠": "马", "马": "鼠", "牛": "羊", "羊": "牛", "虎": "猴", "猴": "虎",
+      "兔": "鸡", "鸡": "兔", "龙": "狗", "狗": "龙", "蛇": "猪", "猪": "蛇"
+    }
+  },
+
+  // 波色定义
+  COLORS: {
+    red: [1, 2, 7, 8, 12, 13, 18, 19, 23, 24, 29, 30, 34, 35, 40, 45, 46],
+    blue: [3, 4, 9, 10, 14, 15, 20, 25, 26, 31, 36, 37, 41, 42, 47, 48],
+    green: [5, 6, 11, 16, 17, 21, 22, 27, 28, 32, 33, 38, 39, 43, 44, 49]
+  },
+
+  // 表情符号映射
+  EMOJI: {
+    red: "🔴",
+    blue: "🔵",
+    green: "🟢",
+    win: "✅",
+    loss: "❌",
+    wait: "⏳",
+    chart: "📊",
+    bot: "🤖",
+    fire: "🔥",
+    shield: "🛡️",
+    rocket: "🚀",
+    sync: "🔄",
+    reset: "♻️",
+    clock: "⏰",
+    auto: "📡",
+    manage: "⚙️",
+    history: "📜",
+    score: "🏆",
+    preview: "👀",
+    back: "🔙",
+    help: "❓",
+    learn: "🧠",
+    calendar: "📅",
+    bell: "🔔"
+  }
+};
+
+// 按钮文本常量
+const BTNS = {
+  REC: `${CONFIG.EMOJI.history} 历史记录`,
+  MANAGE: `${CONFIG.EMOJI.manage} 系统管理`,
+  SCORE: `${CONFIG.EMOJI.score} 预测战绩`,
+  PREVIEW: `${CONFIG.EMOJI.preview} 预览预测`,
+  PUSH: `${CONFIG.EMOJI.rocket} 立即推送`,
+  RESET: `${CONFIG.EMOJI.reset} 重置任务`,
+  TIME: `${CONFIG.EMOJI.clock} 运算时长`,
+  AUTO: `${CONFIG.EMOJI.auto} 自动推送`,
+  SYNC: `${CONFIG.EMOJI.sync} 同步数据`,
+  BACK: `${CONFIG.EMOJI.back} 返回菜单`,
+  LEARN: `${CONFIG.EMOJI.learn} 强制学习`,
+  HELP: `${CONFIG.EMOJI.help} 使用帮助`,
+  SCHEDULE: `${CONFIG.EMOJI.calendar} 定时设置`,
+  STATUS: `${CONFIG.EMOJI.bell} 系统状态`
+};
+
+// 键盘布局定义（完整版）
+const KEYBOARDS = {
+  LOBBY: {
+    keyboard: [
+      [{ text: CONFIG.SYSTEM.NAME }],
+      [{ text: "🤖 AI 助手" }, { text: BTNS.HELP }],
+      [{ text: BTNS.STATUS }]
+    ],
+    resize_keyboard: true,
+    persistent: true
+  },
+
+  MAIN_MENU: {
+    keyboard: [
+      [{ text: BTNS.REC }, { text: BTNS.SCORE }],
+      [{ text: BTNS.PREVIEW }],
+      [{ text: BTNS.MANAGE }],
+      [{ text: "🔙 返回大厅" }, { text: BTNS.HELP }]
+    ],
+    resize_keyboard: true
+  },
+
+  ADMIN_MENU: {
+    keyboard: [
+      [{ text: BTNS.PUSH }, { text: BTNS.RESET }],
+      [{ text: BTNS.AUTO }, { text: BTNS.TIME }],
+      [{ text: BTNS.SYNC }, { text: BTNS.SCHEDULE }],
+      [{ text: BTNS.LEARN }, { text: BTNS.STATUS }],
+      [{ text: BTNS.BACK }]
+    ],
+    resize_keyboard: true
+  },
+
+  TIME_SETTINGS: {
+    keyboard: [
+      [{ text: "SET_DUR_1" }, { text: "SET_DUR_3" }, { text: "SET_DUR_5" }],
+      [{ text: "SET_DUR_8" }, { text: "SET_DUR_12" }],
+      [{ text: BTNS.BACK }]
+    ],
+    resize_keyboard: true
+  },
+
+  SCHEDULE_SETTINGS: {
+    keyboard: [
+      [{ text: "定时 08:00" }, { text: "定时 12:00" }, { text: "定时 18:00" }],
+      [{ text: "定时 20:00" }, { text: "定时 22:00" }],
+      [{ text: "定时关闭" }, { text: "查看定时" }],
+      [{ text: BTNS.BACK }]
+    ],
+    resize_keyboard: true
+  },
+
+  AI_CHAT: {
+    keyboard: [[{ text: "🔙 返回大厅" }]],
+    resize_keyboard: true
+  }
+};
+
+// ==============================================================================
+// 2. 工具类与辅助函数 (Utilities & Helpers)
+// ==============================================================================
+
+/**
+ * 日志记录器
+ */
+class Logger {
+  static info(context, message) {
+    const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
+    console.log(`[${timestamp}] [INFO] [${context}] ${message}`);
+  }
+
+  static error(context, message, error = null) {
+    const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
+    console.error(`[${timestamp}] [ERROR] [${context}] ${message}`, error ? error : '');
+  }
+
+  static warn(context, message) {
+    const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
+    console.warn(`[${timestamp}] [WARN] [${context}] ${message}`);
+  }
+
+  static debug(context, message) {
+    const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
+    console.debug(`[${timestamp}] [DEBUG] [${context}] ${message}`);
+  }
+}
+
+/**
+ * 格式化工具
+ */
+class Formatter {
+  /**
+   * 根据数字获取属性（生肖、波色）
+   */
+  static getAttributes(number) {
+    const num = parseInt(number);
+    if (num < 1 || num > 49) return { zodiac: "未知", color: "未知" };
+    
+    let color = "red";
+    if (CONFIG.COLORS.blue.includes(num)) color = "blue";
+    else if (CONFIG.COLORS.green.includes(num)) color = "green";
+
+    let zodiac = "";
+    for (const [zodiacName, numbers] of Object.entries(CONFIG.ZODIAC_MAP)) {
+      if (numbers.includes(num)) {
+        zodiac = zodiacName;
+        break;
+      }
+    }
+    return { zodiac, color };
+  }
+
+  /**
+   * 格式化开奖号码显示
+   */
+  static formatOpenCode(codeString) {
+    return codeString.replace(/,/g, "-");
+  }
+
+  /**
+   * 获取当前北京时间
+   */
+  static getBeijingTime() {
+    const now = new Date();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    return new Date(utc + (3600000 * CONFIG.SYSTEM.TIMEZONE_OFFSET));
+  }
+
+  /**
+   * 格式化北京时间字符串
+   */
+  static formatBeijingTime(date = null) {
+    const d = date || this.getBeijingTime();
+    return d.toISOString().replace('T', ' ').substr(0, 19) + " (UTC+8)";
+  }
+
+  /**
+   * 格式化时间显示 (HH:MM)
+   */
+  static formatTime(timeStr) {
+    if (!timeStr || timeStr === "OFF") return "未设置";
+    return timeStr;
+  }
+
+  /**
+   * 生成进度条
+   */
+  static generateProgressBar(current, total, length = 10) {
+    const percentage = total > 0 ? (current / total) : 0;
+    const filled = Math.floor(length * percentage);
+    const empty = length - filled;
+    return "█".repeat(filled) + "░".repeat(empty);
+  }
+}
+
+/**
+ * 用户状态管理器
+ */
+class UserStateManager {
+  constructor() {
+    this.states = new Map();
+  }
+
+  setState(userId, state) {
+    this.states.set(userId, {
+      ...state,
+      timestamp: Date.now(),
+      lastActivity: Date.now()
+    });
+    this.cleanup();
+  }
+
+  getState(userId) {
+    const state = this.states.get(userId);
+    if (state && Date.now() - state.timestamp < 30 * 60 * 1000) { // 30分钟有效期
+      state.lastActivity = Date.now();
+      return state;
+    }
+    this.states.delete(userId);
+    return null;
+  }
+
+  updateState(userId, updates) {
+    const state = this.getState(userId);
+    if (state) {
+      this.states.set(userId, {
+        ...state,
+        ...updates,
+        lastActivity: Date.now()
+      });
+      return true;
+    }
+    return false;
+  }
+
+  deleteState(userId) {
+    this.states.delete(userId);
+  }
+
+  cleanup() {
+    const now = Date.now();
+    for (const [userId, state] of this.states.entries()) {
+      if (now - state.lastActivity > 30 * 60 * 1000) {
+        this.states.delete(userId);
+      }
+    }
+  }
+}
+
+const userStateManager = new UserStateManager();
+
+// ==============================================================================
+// 3. 数据库操作层 (Database Access Layer) - 完整版
+// ==============================================================================
+
+const DB = {
+  /**
+   * 获取历史记录
+   */
+  getHistory: async (env, limit = null, offset = 0) => {
+    try {
+      let sql = "SELECT * FROM lottery_history ORDER BY expect DESC";
+      let params = [];
+      if (limit) {
+        sql += " LIMIT ? OFFSET ?";
+        params.push(limit, offset);
+      }
+      const { results } = await env.DB.prepare(sql).bind(...params).all();
+      return results || [];
+    } catch (e) {
+      Logger.error("DB", "getHistory failed", e);
+      return [];
+    }
+  },
+
+  /**
+   * 获取记录总数
+   */
+  getHistoryCount: async (env) => {
+    try {
+      const result = await env.DB.prepare("SELECT COUNT(*) as count FROM lottery_history").first();
+      return result ? result.count : 0;
+    } catch (e) {
+      Logger.error("DB", "getHistoryCount failed", e);
+      return 0;
+    }
+  },
+
+  /**
+   * 获取指定期号的历史记录
+   */
+  getHistoryByExpect: async (env, expect) => {
+    try {
+      const result = await env.DB.prepare(
+        "SELECT * FROM lottery_history WHERE expect = ? ORDER BY expect DESC"
+      ).bind(expect).first();
+      return result || null;
+    } catch (e) {
+      Logger.error("DB", `getHistoryByExpect failed for ${expect}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取最近的N期历史记录
+   */
+  getRecentHistory: async (env, count = 100) => {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM lottery_history ORDER BY expect DESC LIMIT ?"
+      ).bind(count).all();
+      return results || [];
+    } catch (e) {
+      Logger.error("DB", "getRecentHistory failed", e);
+      return [];
+    }
+  },
+
+  /**
+   * 添加单条历史记录
+   */
+  addHistory: async (env, exp, code) => {
+    try {
+      return await env.DB.prepare(
+        "INSERT OR IGNORE INTO lottery_history (expect, open_code) VALUES (?, ?)"
+      ).bind(exp.toString(), code).run();
+    } catch (e) {
+      Logger.error("DB", `addHistory failed for ${exp}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 批量添加历史记录
+   */
+  batchAddHistory: async (env, records) => {
+    try {
+      if (!records || records.length === 0) return { success: true, added: 0, skipped: 0 };
+      
+      const CHUNK_SIZE = 50;
+      let totalAdded = 0;
+      let totalSkipped = 0;
+
+      Logger.info("DB", `开始批量添加 ${records.length} 条记录`);
+
+      for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+        const chunk = records.slice(i, i + CHUNK_SIZE);
+        const batch = env.DB.batch(
+          chunk.map(record =>
+            env.DB.prepare(
+              "INSERT OR IGNORE INTO lottery_history (expect, open_code) VALUES (?, ?)"
+            ).bind(record.expect.toString(), record.open_code)
+          )
+        );
+        
+        try {
+          const results = await batch;
+          const chunkAdded = results.reduce((sum, result) => sum + result.changes, 0);
+          const chunkSkipped = chunk.length - chunkAdded;
+          
+          totalAdded += chunkAdded;
+          totalSkipped += chunkSkipped;
+          
+          Logger.debug("DB", `批次 ${Math.floor(i/CHUNK_SIZE)+1}: 添加 ${chunkAdded} 条，跳过 ${chunkSkipped} 条`);
+          
+          // 避免速率限制
+          if (i + CHUNK_SIZE < records.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        } catch (chunkError) {
+          Logger.error("DB", `批次 ${Math.floor(i/CHUNK_SIZE)+1} 插入失败`, chunkError);
+          
+          // 失败后尝试单条插入
+          for (const record of chunk) {
+            try {
+              const result = await env.DB.prepare(
+                "INSERT OR IGNORE INTO lottery_history (expect, open_code) VALUES (?, ?)"
+              ).bind(record.expect.toString(), record.open_code).run();
+              totalAdded += result.changes;
+              totalSkipped += (1 - result.changes);
+            } catch (singleError) {
+              Logger.error("DB", `单条插入失败 ${record.expect}`, singleError);
+              totalSkipped++;
+            }
+          }
+        }
+      }
+      
+      Logger.info("DB", `批量添加完成: 总计添加 ${totalAdded} 条，跳过 ${totalSkipped} 条`);
+      return { success: true, added: totalAdded, skipped: totalSkipped };
+    } catch (e) {
+      Logger.error("DB", "batchAddHistory failed", e);
+      return { success: false, error: e.message };
+    }
+  },
+
+  /**
+   * 获取最新期号
+   */
+  getLatestExpect: async (env) => {
+    try {
+      const result = await env.DB.prepare(
+        "SELECT expect FROM lottery_history ORDER BY expect DESC LIMIT 1"
+      ).first();
+      return result ? result.expect : null;
+    } catch (e) {
+      Logger.error("DB", "getLatestExpect failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取最早期号
+   */
+  getEarliestExpect: async (env) => {
+    try {
+      const result = await env.DB.prepare(
+        "SELECT expect FROM lottery_history ORDER BY expect ASC LIMIT 1"
+      ).first();
+      return result ? result.expect : null;
+    } catch (e) {
+      Logger.error("DB", "getEarliestExpect failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取当前任务
+   */
+  getTask: async (env) => {
+    try {
+      const r = await env.DB.prepare("SELECT data FROM lottery_tasks WHERE id = 1").first();
+      return r ? JSON.parse(r.data) : null;
+    } catch (e) {
+      Logger.error("DB", "getTask failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 保存任务
+   */
+  saveTask: async (env, data) => {
+    try {
+      return await env.DB.prepare(
+        "INSERT OR REPLACE INTO lottery_tasks (id, data) VALUES (1, ?)"
+      ).bind(JSON.stringify(data)).run();
+    } catch (e) {
+      Logger.error("DB", "saveTask failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 删除任务
+   */
+  deleteTask: async (env) => {
+    try {
+      return await env.DB.prepare("DELETE FROM lottery_tasks WHERE id = 1").run();
+    } catch (e) {
+      Logger.error("DB", "deleteTask failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 归档预测结果
+   */
+  archivePrediction: async (env, expect, predData) => {
+    try {
+      return await env.DB.prepare(
+        "INSERT OR IGNORE INTO prediction_archives (expect, prediction_json) VALUES (?, ?)"
+      ).bind(expect.toString(), JSON.stringify(predData)).run();
+    } catch (e) {
+      Logger.error("DB", `archivePrediction failed for ${expect}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取归档记录
+   */
+  getArchives: async (env, limit = 10, offset = 0) => {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM prediction_archives WHERE result_status != 'PENDING' ORDER BY expect DESC LIMIT ? OFFSET ?"
+      ).bind(limit, offset).all();
+      return results || [];
+    } catch (e) {
+      Logger.error("DB", "getArchives failed", e);
+      return [];
+    }
+  },
+
+  /**
+   * 获取所有归档记录
+   */
+  getAllArchives: async (env) => {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM prediction_archives ORDER BY expect DESC"
+      ).all();
+      return results || [];
+    } catch (e) {
+      Logger.error("DB", "getAllArchives failed", e);
+      return [];
+    }
+  },
+
+  /**
+   * 获取归档记录总数
+   */
+  getArchiveCount: async (env) => {
+    try {
+      const result = await env.DB.prepare(
+        "SELECT COUNT(*) as count FROM prediction_archives"
+      ).first();
+      return result ? result.count : 0;
+    } catch (e) {
+      Logger.error("DB", "getArchiveCount failed", e);
+      return 0;
+    }
+  },
+
+  /**
+   * 更新归档状态
+   */
+  updateArchiveStatus: async (env, expect, status, detail) => {
+    try {
+      return await env.DB.prepare(
+        "UPDATE prediction_archives SET result_status = ?, hit_detail = ?, updated_at = CURRENT_TIMESTAMP WHERE expect = ?"
+      ).bind(status, detail, expect.toString()).run();
+    } catch (e) {
+      Logger.error("DB", `updateArchiveStatus failed for ${expect}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取指定期号的归档记录
+   */
+  getArchiveByExpect: async (env, expect) => {
+    try {
+      const result = await env.DB.prepare(
+        "SELECT * FROM prediction_archives WHERE expect = ?"
+      ).bind(expect.toString()).first();
+      return result || null;
+    } catch (e) {
+      Logger.error("DB", `getArchiveByExpect failed for ${expect}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取设置
+   */
+  getSetting: async (env, key, def = "") => {
+    try {
+      const r = await env.DB.prepare(
+        "SELECT value FROM lottery_settings WHERE setting_key = ?"
+      ).bind(key).first();
+      return r ? r.value : def;
+    } catch (e) {
+      Logger.error("DB", `getSetting failed for ${key}`, e);
+      return def;
+    }
+  },
+
+  /**
+   * 保存设置
+   */
+  saveSetting: async (env, key, val) => {
+    try {
+      return await env.DB.prepare(
+        "INSERT OR REPLACE INTO lottery_settings (setting_key, value) VALUES (?, ?)"
+      ).bind(key, val).run();
+    } catch (e) {
+      Logger.error("DB", `saveSetting failed for ${key}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取所有设置
+   */
+  getAllSettings: async (env) => {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT setting_key, value FROM lottery_settings"
+      ).all();
+      const settings = {};
+      results.forEach(row => {
+        settings[row.setting_key] = row.value;
+      });
+      return settings;
+    } catch (e) {
+      Logger.error("DB", "getAllSettings failed", e);
+      return {};
+    }
+  },
+
+  /**
+   * 获取算法权重
+   */
+  getWeights: async (env) => {
+    try {
+      const w = await DB.getSetting(env, "ALGO_WEIGHTS", null);
+      if (w) {
+        const weights = JSON.parse(w);
+        // 确保所有权重字段都存在
+        return { ...CONFIG.DEFAULT_ALGO_WEIGHTS, ...weights };
+      }
+      return { ...CONFIG.DEFAULT_ALGO_WEIGHTS };
+    } catch (e) {
+      Logger.error("DB", "getWeights failed, using default", e);
+      return { ...CONFIG.DEFAULT_ALGO_WEIGHTS };
+    }
+  },
+
+  /**
+   * 保存算法权重
+   */
+  saveWeights: async (env, weights) => {
+    try {
+      // 限制权重范围
+      const sanitizedWeights = {};
+      Object.keys(weights).forEach(key => {
+        let value = weights[key];
+        value = Math.max(0.1, Math.min(5.0, value)); // 限制在0.1-5.0之间
+        sanitizedWeights[key] = parseFloat(value.toFixed(2));
+      });
+      
+      return await DB.saveSetting(env, "ALGO_WEIGHTS", JSON.stringify(sanitizedWeights));
+    } catch (e) {
+      Logger.error("DB", "saveWeights failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 重置算法权重为默认值
+   */
+  resetWeights: async (env) => {
+    try {
+      return await DB.saveWeights(env, CONFIG.DEFAULT_ALGO_WEIGHTS);
+    } catch (e) {
+      Logger.error("DB", "resetWeights failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 清空所有数据
+   */
+  clearAllHistory: async (env) => {
+    try {
+      const batch = [
+        env.DB.prepare("DELETE FROM lottery_history"),
+        env.DB.prepare("DELETE FROM prediction_archives"),
+        env.DB.prepare("DELETE FROM lottery_tasks"),
+        env.DB.prepare("DELETE FROM lottery_settings")
+      ];
+      await env.DB.batch(batch);
+      return { success: true, message: "所有数据已清空" };
+    } catch (e) {
+      Logger.error("DB", "clearAllHistory failed", e);
+      return { success: false, error: e.message };
+    }
+  },
+
+  /**
+   * 获取系统统计信息
+   */
+  getSystemStats: async (env) => {
+    try {
+      const [
+        historyCount,
+        archiveCount,
+        latestExpect,
+        earliestExpect,
+        taskData
+      ] = await Promise.all([
+        DB.getHistoryCount(env),
+        DB.getArchiveCount(env),
+        DB.getLatestExpect(env),
+        DB.getEarliestExpect(env),
+        DB.getTask(env)
+      ]);
+
+      return {
+        historyCount,
+        archiveCount,
+        latestExpect,
+        earliestExpect,
+        hasTask: !!taskData,
+        taskStatus: taskData?.status || "无任务"
+      };
+    } catch (e) {
+      Logger.error("DB", "getSystemStats failed", e);
+      return null;
+    }
+  },
+
+  /**
+   * 初始化默认设置
+   */
+  initDefaultSettings: async (env) => {
+    try {
+      const defaultSettings = {
+        "DURATION": CONFIG.SYSTEM.DEFAULT_DURATION.toString(),
+        "AUTO_PUSH": "ON",
+        "SCHEDULE_TIME": "OFF",
+        "LAST_SCHEDULE_PUSH": "",
+        "ALGO_WEIGHTS": JSON.stringify(CONFIG.DEFAULT_ALGO_WEIGHTS),
+        "SYSTEM_VERSION": CONFIG.SYSTEM.VERSION,
+        "LAST_SYNC": "",
+        "TOTAL_SYNCS": "0",
+        "TOTAL_PUSHES": "0"
+      };
+
+      const batch = Object.entries(defaultSettings).map(([key, value]) =>
+        env.DB.prepare(
+          "INSERT OR IGNORE INTO lottery_settings (setting_key, value) VALUES (?, ?)"
+        ).bind(key, value)
+      );
+
+      await env.DB.batch(batch);
+      Logger.info("DB", "默认设置初始化完成");
+      return true;
+    } catch (e) {
+      Logger.error("DB", "initDefaultSettings failed", e);
+      return false;
+    }
+  }
+};
+
+// ==============================================================================
+// 4. 数学与统计分析引擎 (Mathematical & Statistical Engine) - 完整版
+// ==============================================================================
+
+class MathEngine {
+  /**
+   * 基础数据统计
+   */
+  static analyzeBasicStats(history) {
+    if (!history || history.length === 0) {
+      return {
+        zodiacCounts: {},
+        colorCounts: { red: 0, blue: 0, green: 0 },
+        headCounts: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 },
+        tailCounts: {},
+        numberCounts: {},
+        totalRecords: 0,
+        lastSpecial: null,
+        lastZodiac: null,
+        lastColor: null
+      };
+    }
+
+    const zodiacCounts = {};
+    const colorCounts = { red: 0, blue: 0, green: 0 };
+    const headCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
+    const tailCounts = {};
+    const numberCounts = {};
+
+    // 初始化
+    for (const z in CONFIG.ZODIAC_MAP) zodiacCounts[z] = 0;
+    for (let i = 0; i <= 9; i++) tailCounts[i] = 0;
+    for (let i = 1; i <= 49; i++) numberCounts[i] = 0;
+
+    let lastSpecial = null;
+    let lastZodiac = null;
+    let lastColor = null;
+
+    history.forEach(record => {
+      const special = parseInt(record.open_code.split(",")[6]);
+      const attr = Formatter.getAttributes(special);
+
+      // 生肖统计
+      zodiacCounts[attr.zodiac]++;
+      // 波色统计
+      colorCounts[attr.color]++;
+      // 头数统计
+      const head = Math.floor(special / 10);
+      if (head >= 0 && head <= 4) headCounts[head]++;
+      // 尾数统计
+      tailCounts[special % 10]++;
+      // 号码统计
+      numberCounts[special]++;
+
+      // 记录最后一期
+      if (lastSpecial === null) {
+        lastSpecial = special;
+        lastZodiac = attr.zodiac;
+        lastColor = attr.color;
+      }
+    });
+
+    return {
+      zodiacCounts,
+      colorCounts,
+      headCounts,
+      tailCounts,
+      numberCounts,
+      totalRecords: history.length,
+      lastSpecial,
+      lastZodiac,
+      lastColor
+    };
+  }
+
+  /**
+   * 高级确定性分析 (核心算法)
+   */
+  static analyzeDeterminants(history) {
+    if (!history || history.length < 10) {
+      return {
+        transitionMatrix: {},
+        omission: {},
+        tailMatrix: {},
+        zodiacContinuity: {},
+        colorContinuity: {}
+      };
+    }
+
+    const analysis = {
+      transitionMatrix: {}, // 生肖转移矩阵
+      omission: {},         // 当前遗漏值
+      tailMatrix: {},       // 尾数转移矩阵
+      zodiacContinuity: {}, // 生肖连续性统计
+      colorContinuity: {}   // 波色连续性统计
+    };
+
+    // 初始化结构
+    Object.keys(CONFIG.ZODIAC_MAP).forEach(z => {
+      analysis.transitionMatrix[z] = {};
+      analysis.omission[z] = 0;
+      analysis.zodiacContinuity[z] = { single: 0, double: 0, triple: 0, more: 0 };
+    });
+    
+    for (let i = 0; i < 10; i++) {
+      analysis.tailMatrix[i] = {};
+    }
+    
+    ['red', 'blue', 'green'].forEach(c => {
+      analysis.colorContinuity[c] = { single: 0, double: 0, triple: 0, more: 0 };
+    });
+
+    // 1. 计算当前遗漏值
+    const currentOmission = {};
+    Object.keys(CONFIG.ZODIAC_MAP).forEach(z => currentOmission[z] = 0);
+
+    for (let i = 0; i < history.length; i++) {
+      const special = parseInt(history[i].open_code.split(",")[6]);
+      const z = Formatter.getAttributes(special).zodiac;
+
+      Object.keys(currentOmission).forEach(key => {
+        if (currentOmission[key] !== -1) {
+          if (key === z) currentOmission[key] = -1;
+          else currentOmission[key]++;
+        }
+      });
+    }
+
+    Object.keys(currentOmission).forEach(key => {
+      analysis.omission[key] = currentOmission[key] === -1 ? 0 : currentOmission[key];
+    });
+
+    // 2. 构建马尔可夫链和连续性统计
+    let currentZodiacStreak = 0;
+    let currentZodiac = null;
+    let currentColorStreak = 0;
+    let currentColor = null;
+
+    for (let i = history.length - 2; i >= 0; i--) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+      const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+      const prevColor = Formatter.getAttributes(prevSpecial).color;
+      const currColor = Formatter.getAttributes(currSpecial).color;
+
+      const prevTail = prevSpecial % 10;
+      const currTail = currSpecial % 10;
+
+      // 填充生肖转移矩阵
+      if (!analysis.transitionMatrix[prevZodiac][currZodiac]) {
+        analysis.transitionMatrix[prevZodiac][currZodiac] = 0;
+      }
+      analysis.transitionMatrix[prevZodiac][currZodiac]++;
+
+      // 填充尾数转移矩阵
+      if (!analysis.tailMatrix[prevTail][currTail]) {
+        analysis.tailMatrix[prevTail][currTail] = 0;
+      }
+      analysis.tailMatrix[prevTail][currTail]++;
+
+      // 统计连续性
+      // 生肖连续性
+      if (prevZodiac === currZodiac) {
+        if (currentZodiac !== prevZodiac) {
+          currentZodiac = prevZodiac;
+          currentZodiacStreak = 2;
+        } else {
+          currentZodiacStreak++;
+        }
+      } else {
+        if (currentZodiacStreak > 0) {
+          const z = currentZodiac;
+          if (currentZodiacStreak === 2) analysis.zodiacContinuity[z].double++;
+          else if (currentZodiacStreak === 3) analysis.zodiacContinuity[z].triple++;
+          else if (currentZodiacStreak > 3) analysis.zodiacContinuity[z].more++;
+          currentZodiacStreak = 0;
+          currentZodiac = null;
+        }
+      }
+
+      // 波色连续性
+      if (prevColor === currColor) {
+        if (currentColor !== prevColor) {
+          currentColor = prevColor;
+          currentColorStreak = 2;
+        } else {
+          currentColorStreak++;
+        }
+      } else {
+        if (currentColorStreak > 0) {
+          const c = currentColor;
+          if (currentColorStreak === 2) analysis.colorContinuity[c].double++;
+          else if (currentColorStreak === 3) analysis.colorContinuity[c].triple++;
+          else if (currentColorStreak > 3) analysis.colorContinuity[c].more++;
+          currentColorStreak = 0;
+          currentColor = null;
+        }
+      }
+    }
+
+    // 处理最后的连续
+    if (currentZodiacStreak > 0) {
+      const z = currentZodiac;
+      if (currentZodiacStreak === 2) analysis.zodiacContinuity[z].double++;
+      else if (currentZodiacStreak === 3) analysis.zodiacContinuity[z].triple++;
+      else if (currentZodiacStreak > 3) analysis.zodiacContinuity[z].more++;
+    }
+
+    if (currentColorStreak > 0) {
+      const c = currentColor;
+      if (currentColorStreak === 2) analysis.colorContinuity[c].double++;
+      else if (currentColorStreak === 3) analysis.colorContinuity[c].triple++;
+      else if (currentColorStreak > 3) analysis.colorContinuity[c].more++;
+    }
+
+    // 3. 计算单次出现的次数
+    Object.keys(analysis.zodiacContinuity).forEach(z => {
+      const total = (analysis.zodiacContinuity[z].double || 0) + 
+                   (analysis.zodiacContinuity[z].triple || 0) + 
+                   (analysis.zodiacContinuity[z].more || 0);
+      const singleCount = (analysis.omission[z] === 0 ? 1 : 0); // 简化计算
+      analysis.zodiacContinuity[z].single = Math.max(0, history.length - total - singleCount);
+    });
+
+    return analysis;
+  }
+
+  /**
+   * 计算号码的冷热状态
+   */
+  static calculateHotColdStatus(history, windowSize = 20) {
+    if (!history || history.length === 0) return { hotNumbers: [], warmNumbers: [], coldNumbers: [] };
+    
+    const recentWindow = Math.min(windowSize, history.length);
+    const recentHistory = history.slice(0, recentWindow);
+    const allHistory = history;
+    
+    const recentCounts = {};
+    const totalCounts = {};
+    
+    // 初始化
+    for (let i = 1; i <= 49; i++) {
+      recentCounts[i] = 0;
+      totalCounts[i] = 0;
+    }
+    
+    // 统计
+    allHistory.forEach(record => {
+      const numbers = record.open_code.split(",").map(n => parseInt(n));
+      const special = numbers[6];
+      totalCounts[special]++;
+    });
+    
+    recentHistory.forEach(record => {
+      const numbers = record.open_code.split(",").map(n => parseInt(n));
+      const special = numbers[6];
+      recentCounts[special]++;
+    });
+    
+    // 计算热度分数
+    const heatScores = {};
+    for (let i = 1; i <= 49; i++) {
+      const recentFreq = recentCounts[i];
+      const totalFreq = totalCounts[i];
+      const avgFreq = totalFreq / allHistory.length;
+      
+      // 热度分数 = 近期频率 * 3 + 总频率 * 1
+      const heatScore = (recentFreq * 3) + (totalFreq * 1);
+      heatScores[i] = heatScore;
+    }
+    
+    // 分类
+    const scores = Object.values(heatScores);
+    const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+    
+    const hotNumbers = [];
+    const warmNumbers = [];
+    const coldNumbers = [];
+    
+    for (let i = 1; i <= 49; i++) {
+      if (heatScores[i] > avgScore * 1.5) hotNumbers.push(i);
+      else if (heatScores[i] > avgScore * 0.5) warmNumbers.push(i);
+      else coldNumbers.push(i);
+    }
+    
+    return { hotNumbers, warmNumbers, coldNumbers };
+  }
+
+  /**
+   * 计算遗漏值回归预测
+   */
+  static calculateOmissionPrediction(omissionData) {
+    const predictions = {};
+    
+    Object.entries(omissionData).forEach(([zodiac, omission]) => {
+      let score = 0;
+      
+      if (omission === 0) {
+        // 刚开过，可能不会连续开
+        score = -30;
+      } else if (omission <= 3) {
+        // 较热，可能回补
+        score = 10 + omission * 2;
+      } else if (omission <= 10) {
+        // 温号，正常遗漏
+        score = 20 + omission * 1.5;
+      } else if (omission <= 20) {
+        // 冷号，可能反弹
+        score = 30 + omission * 1.2;
+      } else {
+        // 极冷号，强烈反弹预期
+        score = 50 + omission * 1.0;
+      }
+      
+      predictions[zodiac] = score;
+    });
+    
+    return predictions;
+  }
+}
+
+// ==============================================================================
+// 5. 智能预测生成器 (Intelligent Prediction Generator) - 完整版
+// ==============================================================================
+
+class PredictionEngine {
+  /**
+   * 生成预测结果
+   */
+  static generate(task, historicalAnalysis, weights, determinants = null) {
+    const history = task.history || [];
+
+    // 兜底逻辑：无历史数据
+    if (!history || history.length === 0) {
+      return this.generateStaticFallback(task);
+    }
+
+    // 获取上一期数据作为锚点
+    const lastRecord = history[0];
+    const lastSpecial = parseInt(lastRecord.open_code.split(",")[6]);
+    const lastAttr = Formatter.getAttributes(lastSpecial);
+    const lastZodiac = lastAttr.zodiac;
+    const lastColor = lastAttr.color;
+    const lastTail = lastSpecial % 10;
+    const lastHead = Math.floor(lastSpecial / 10);
+
+    // 执行深度确定性分析（如果未提供）
+    if (!determinants) {
+      determinants = MathEngine.analyzeDeterminants(history);
+    }
+    
+    const { zodiacCounts, colorCounts, headCounts, tailCounts, numberCounts } = historicalAnalysis;
+
+    // 使用传入的权重，或回退到默认
+    const W = weights || CONFIG.DEFAULT_ALGO_WEIGHTS;
+
+    // ----------------------------------------------------
+    // 维度一：生肖评分系统 (Multi-Factor Scoring)
+    // ----------------------------------------------------
+    const zodiacScores = {};
+
+    Object.keys(CONFIG.ZODIAC_MAP).forEach(zodiac => {
+      let score = 0;
+
+      // 1. 基础频率分 (Frequency Score)
+      const freq = zodiacCounts[zodiac] || 0;
+      const freqScore = (freq / history.length) * 100;
+      score += freqScore * W.w_freq;
+
+      // 2. 马尔可夫转移分 (Markov Transition Score)
+      const transitions = determinants.transitionMatrix[lastZodiac] || {};
+      const transitionCount = transitions[zodiac] || 0;
+      const totalTransitions = Object.values(transitions).reduce((a, b) => a + b, 0) || 1;
+      const prob = transitionCount / totalTransitions;
+      score += prob * 250 * W.w_markov;
+
+      // 3. 遗漏值回归分 (Omission Regression Score)
+      const omission = determinants.omission[zodiac] || 0;
+      let omissionScore = 0;
+      
+      if (omission === 0) {
+        // 连开惩罚，但考虑可能的热号趋势
+        const continuity = determinants.zodiacContinuity[zodiac] || { single: 0, double: 0, triple: 0, more: 0 };
+        const totalContinuity = continuity.double + continuity.triple * 2 + continuity.more * 3;
+        
+        if (totalContinuity > 3) {
+          // 这个生肖有连开历史，可能继续热
+          omissionScore = 10;
+        } else {
+          // 正常连开惩罚
+          omissionScore = -30;
+        }
+      } else if (omission <= 3) {
+        omissionScore = 10 + omission * 3; // 较热回补
+      } else if (omission <= 10) {
+        omissionScore = 20 + omission * 2; // 温号正常遗漏
+      } else if (omission <= 20) {
+        omissionScore = 30 + omission * 1.5; // 冷号反弹预期
+      } else {
+        omissionScore = 50 + omission * 1.0; // 极冷强烈反弹
+      }
+      
+      score += omissionScore * W.w_omission;
+
+      // 4. 生肖关系加分 (Relation Score)
+      let relationScore = 0;
+      
+      // 六合关系 (强关联)
+      if (CONFIG.RELATIONS.LIU_HE[lastZodiac] === zodiac) {
+        relationScore += 25;
+      }
+      
+      // 三合关系 (次强关联)
+      if (CONFIG.RELATIONS.SAN_HE[lastZodiac]?.includes(zodiac)) {
+        relationScore += 15;
+      }
+      
+      // 相冲关系 (反向关联，有时也会出现)
+      if (CONFIG.RELATIONS.CHONG[lastZodiac] === zodiac) {
+        relationScore += 5; // 弱关联，作为参考
+      }
+      
+      score += relationScore * W.w_relation;
+
+      // 5. 连续性模式识别
+      const continuity = determinants.zodiacContinuity[zodiac] || { single: 0, double: 0, triple: 0, more: 0 };
+      const continuityPatternScore = continuity.double * 5 + continuity.triple * 8 + continuity.more * 10;
+      score += continuityPatternScore * 0.1;
+
+      zodiacScores[zodiac] = score;
+    });
+
+    // 排序生肖
+    const sortedZodiacs = Object.entries(zodiacScores)
+      .sort((a, b) => b[1] - a[1])
+      .map(entry => entry[0]);
+
+    const mainZodiacs = sortedZodiacs.slice(0, 3);
+    const guardZodiacs = sortedZodiacs.slice(3, 6);
+
+    // ----------------------------------------------------
+    // 维度二：波色分析 (Color Analysis)
+    // ----------------------------------------------------
+    const colorScores = {};
+    ['red', 'blue', 'green'].forEach(color => {
+      const count = colorCounts[color] || 0;
+      const ratio = count / history.length;
+      
+      // 理论概率
+      let ideal = 0;
+      if (color === 'red') ideal = CONFIG.COLORS.red.length / 49;
+      else if (color === 'blue') ideal = CONFIG.COLORS.blue.length / 49;
+      else ideal = CONFIG.COLORS.green.length / 49;
+      
+      // 均值回归分数：偏离越大，回归动力越强
+      let regressionScore = (ideal - ratio) * 200;
+      
+      // 近期热度修正
+      let recentHits = 0;
+      for (let i = 0; i < Math.min(10, history.length); i++) {
+        const special = parseInt(history[i].open_code.split(",")[6]);
+        if (Formatter.getAttributes(special).color === color) recentHits++;
+      }
+      
+      // 连续性分析
+      const continuity = determinants.colorContinuity[color] || { single: 0, double: 0, triple: 0, more: 0 };
+      const continuityScore = continuity.double * 3 + continuity.triple * 5 + continuity.more * 8;
+      
+      // 综合分数
+      let score = regressionScore;
+      
+      if (color === lastColor) {
+        // 刚开过，可能不会连续
+        if (recentHits > 3) score -= 40; // 太热降温
+        else score += continuityScore * 2; // 有一定连续性
+      } else {
+        // 不同颜色，有机会
+        if (recentHits < 2) score += 20; // 冷色升温
+      }
+      
+      // 应用权重
+      colorScores[color] = score * W.w_color;
+    });
+
+    const sortedColors = Object.entries(colorScores)
+      .sort((a, b) => b[1] - a[1])
+      .map(entry => entry[0]);
+
+    // ----------------------------------------------------
+    // 维度三：尾数与头数 (Tail & Head)
+    // ----------------------------------------------------
+    // 尾数分析
+    const tailScores = {};
+    for (let i = 0; i < 10; i++) {
+      const count = tailCounts[i] || 0;
+      const ratio = count / history.length;
+      const ideal = 0.1; // 每个尾数理论概率
+      
+      // 转移概率
+      const transitions = determinants.tailMatrix[lastTail] || {};
+      const transitionCount = transitions[i] || 0;
+      const totalTransitions = Object.values(transitions).reduce((a, b) => a + b, 0) || 1;
+      const transitionProb = transitionCount / totalTransitions;
+      
+      // 均值回归 + 转移概率
+      let score = (ideal - ratio) * 100 + transitionProb * 50;
+      
+      // 近期热度
+      let recentHits = 0;
+      for (let j = 0; j < Math.min(10, history.length); j++) {
+        const special = parseInt(history[j].open_code.split(",")[6]);
+        if (special % 10 === i) recentHits++;
+      }
+      
+      if (i === lastTail) {
+        if (recentHits > 2) score -= 30; // 过热降温
+        else score += 10; // 可能连尾
+      }
+      
+      tailScores[i] = score;
+    }
+    
+    const sortedTails = Object.entries(tailScores)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(entry => parseInt(entry[0]));
+
+    // 头数分析
+    const headScores = {};
+    for (let i = 0; i <= 4; i++) {
+      const count = headCounts[i] || 0;
+      const ratio = count / history.length;
+      
+      // 理论概率
+      let ideal = 0;
+      if (i === 0) ideal = 9 / 49;    // 0头有9个号码
+      else if (i === 1) ideal = 10 / 49; // 1头有10个号码
+      else if (i === 2) ideal = 10 / 49; // 2头有10个号码
+      else if (i === 3) ideal = 10 / 49; // 3头有10个号码
+      else ideal = 10 / 49;              // 4头有10个号码
+      
+      let score = (ideal - ratio) * 100;
+      
+      if (i === lastHead) {
+        // 刚开过这个头数
+        let recentSameHead = 0;
+        for (let j = 0; j < Math.min(5, history.length); j++) {
+          const special = parseInt(history[j].open_code.split(",")[6]);
+          if (Math.floor(special / 10) === i) recentSameHead++;
+        }
+        
+        if (recentSameHead > 2) score -= 20; // 过热
+        else score += 5; // 可能延续
+      }
+      
+      headScores[i] = score;
+    }
+    
+    const sortedHeads = Object.entries(headScores)
+      .sort((a, b) => b[1] - a[1])
+      .map(entry => entry[0]);
+
+    // ----------------------------------------------------
+    // 维度四：号码选取与形态分析
+    // ----------------------------------------------------
+    const bestZodiac = mainZodiacs[0];
+    const bestColor = sortedColors[0];
+    const bestHead = parseInt(sortedHeads[0]);
+    const bestTails = sortedTails.slice(0, 3);
+    
+    // 候选号码：符合最佳生肖、波色、头尾
+    let candidates = CONFIG.ZODIAC_MAP[bestZodiac].filter(num => {
+      const attr = Formatter.getAttributes(num);
+      const head = Math.floor(num / 10);
+      const tail = num % 10;
+      
+      // 基础匹配
+      const matchesColor = attr.color === bestColor;
+      const matchesHead = head === bestHead;
+      const matchesTail = bestTails.includes(tail);
+      
+      // 计分
+      let score = 0;
+      if (matchesColor) score += 3;
+      if (matchesHead) score += 2;
+      if (matchesTail) score += 1;
+      
+      return score >= 2; // 至少匹配2个条件
+    });
+    
+    // 如果没有足够候选，放宽条件
+    if (candidates.length === 0) {
+      candidates = CONFIG.ZODIAC_MAP[bestZodiac].filter(num => {
+        const attr = Formatter.getAttributes(num);
+        return attr.color === bestColor;
+      });
+    }
+    
+    // 如果还是没有，取生肖的第一个号码
+    if (candidates.length === 0) {
+      candidates = [CONFIG.ZODIAC_MAP[bestZodiac][0]];
+    }
+    
+    // 从候选号码中选择一个（基于历史频率）
+    let bestNumber = candidates[0];
+    let maxFreq = numberCounts[bestNumber] || 0;
+    
+    candidates.forEach(num => {
+      const freq = numberCounts[num] || 0;
+      if (freq > maxFreq) {
+        maxFreq = freq;
+        bestNumber = num;
+      }
+    });
+    
+    // 形态判断
+    const isBig = bestNumber >= 25;
+    const isOdd = bestNumber % 2 !== 0;
+    const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
+    
+    // 计算置信度
+    const topScore = zodiacScores[mainZodiacs[0]];
+    const secondScore = zodiacScores[mainZodiacs[1]];
+    const scoreGap = topScore - secondScore;
+    
+    let confidence = 50; // 基础置信度
+    
+    // 基于数据量
+    confidence += Math.min(20, history.length / 10);
+    
+    // 基于分数差距
+    confidence += Math.min(20, scoreGap / 10);
+    
+    // 基于多个维度的一致性
+    const consistencyBonus = (mainZodiacs.includes(bestZodiac) ? 5 : 0) +
+                           (sortedColors[0] === bestColor ? 5 : 0) +
+                           (sortedHeads[0] == bestHead ? 3 : 0);
+    
+    confidence += consistencyBonus;
+    
+    // 限制范围
+    confidence = Math.max(30, Math.min(95, confidence));
+
+    return {
+      nextExpect: task.expect,
+      zodiac: {
+        main: mainZodiacs,
+        guard: guardZodiacs,
+        scores: zodiacScores
+      },
+      color: {
+        main: bestColor,
+        guard: sortedColors[1],
+        scores: colorScores
+      },
+      head: {
+        main: `${bestHead}头`,
+        guard: `${sortedHeads[1]}头`,
+        scores: headScores
+      },
+      tail: bestTails,
+      tailScores: tailScores,
+      shape: shape,
+      exampleNumber: bestNumber,
+      exampleZodiac: bestZodiac,
+      exampleColor: Formatter.getAttributes(bestNumber).color,
+      confidence: Math.floor(confidence),
+      analysisBased: true,
+      totalHistoryRecords: history.length,
+      usedWeights: W,
+      generatedAt: new Date().toISOString(),
+      algorithmVersion: "V5.0"
+    };
+  }
+
+  /**
+   * 静态兜底预测 (无数据时使用)
+   */
+  static generateStaticFallback(task) {
+    const date = new Date();
+    const day = date.getDate();
+    const hour = date.getHours();
+    
+    // 基于日期和时间的确定性选择
+    const allZodiacs = Object.keys(CONFIG.ZODIAC_MAP);
+    const colors = ['red', 'blue', 'green'];
+    
+    const zodiacIndex = (day * hour) % allZodiacs.length;
+    const colorIndex = (day + hour) % colors.length;
+    
+    const mainZodiac = allZodiacs[zodiacIndex];
+    const mainColor = colors[colorIndex];
+    
+    // 从生肖中选一个号码
+    const candidates = CONFIG.ZODIAC_MAP[mainZodiac];
+    const numIndex = hour % candidates.length;
+    const exampleNumber = candidates[numIndex];
+    
+    // 形态判断
+    const isBig = exampleNumber >= 25;
+    const isOdd = exampleNumber % 2 !== 0;
+    const shape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
+    
+    return {
+      nextExpect: task.expect,
+      zodiac: {
+        main: [mainZodiac, allZodiacs[(zodiacIndex + 3) % allZodiacs.length], allZodiacs[(zodiacIndex + 6) % allZodiacs.length]],
+        guard: [allZodiacs[(zodiacIndex + 1) % allZodiacs.length], allZodiacs[(zodiacIndex + 4) % allZodiacs.length], allZodiacs[(zodiacIndex + 8) % allZodiacs.length]],
+        scores: {}
+      },
+      color: {
+        main: mainColor,
+        guard: colors[(colorIndex + 1) % colors.length],
+        scores: {}
+      },
+      head: {
+        main: "2头",
+        guard: "4头",
+        scores: {}
+      },
+      tail: [1, 5, 9],
+      tailScores: {},
+      shape: shape,
+      exampleNumber: exampleNumber,
+      exampleZodiac: mainZodiac,
+      exampleColor: Formatter.getAttributes(exampleNumber).color,
+      confidence: 20,
+      analysisBased: false,
+      totalHistoryRecords: 0,
+      usedWeights: CONFIG.DEFAULT_ALGO_WEIGHTS,
+      generatedAt: new Date().toISOString(),
+      algorithmVersion: "V5.0-Static"
+    };
+  }
+
+  /**
+   * 批量生成历史复盘预测
+   */
+  static async generateBacktestPrediction(env, targetExpect, historyUpToTarget) {
+    const mockTask = {
+      expect: targetExpect,
+      history: historyUpToTarget,
+      startTime: Date.now(),
+      unlockTime: Date.now() + CONFIG.SYSTEM.DEFAULT_DURATION,
+      status: "CALCULATING"
+    };
+    
+    const historicalAnalysis = MathEngine.analyzeBasicStats(historyUpToTarget);
+    const weights = await DB.getWeights(env);
+    
+    return this.generate(mockTask, historicalAnalysis, weights);
+  }
+
+  /**
+   * 评估预测准确性
+   */
+  static evaluatePrediction(prediction, actualNumber) {
+    const actualAttr = Formatter.getAttributes(actualNumber);
+    
+    const results = {
+      zodiacHit: {
+        main: prediction.zodiac.main.includes(actualAttr.zodiac),
+        guard: prediction.zodiac.guard.includes(actualAttr.zodiac)
+      },
+      colorHit: {
+        main: prediction.color.main === actualAttr.color,
+        guard: prediction.color.guard === actualAttr.color
+      },
+      tailHit: prediction.tail.includes(actualNumber % 10),
+      headHit: parseInt(prediction.head.main) === Math.floor(actualNumber / 10),
+      shapeHit: this.checkShapeHit(prediction.shape, actualNumber),
+      numberHit: prediction.exampleNumber === actualNumber
+    };
+    
+    // 计算总分 (0-100)
+    let score = 0;
+    if (results.zodiacHit.main) score += 40;
+    else if (results.zodiacHit.guard) score += 20;
+    
+    if (results.colorHit.main) score += 20;
+    else if (results.colorHit.guard) score += 10;
+    
+    if (results.tailHit) score += 15;
+    if (results.headHit) score += 10;
+    if (results.shapeHit) score += 5;
+    if (results.numberHit) score += 10;
+    
+    results.totalScore = score;
+    results.grade = this.getGrade(score);
+    
+    return results;
+  }
+
+  /**
+   * 检查形态是否命中
+   */
+  static checkShapeHit(predictedShape, actualNumber) {
+    const isBig = actualNumber >= 25;
+    const isOdd = actualNumber % 2 !== 0;
+    const actualShape = (isBig ? "大" : "小") + (isOdd ? "单" : "双");
+    return predictedShape === actualShape;
+  }
+
+  /**
+   * 根据分数获取等级
+   */
+  static getGrade(score) {
+    if (score >= 80) return "S";
+    if (score >= 70) return "A";
+    if (score >= 60) return "B";
+    if (score >= 50) return "C";
+    if (score >= 40) return "D";
+    return "F";
+  }
+}
+
+// ==============================================================================
+// 6. 消息渲染器 (UI Renderer) - 完整版
+// ==============================================================================
+
+class MessageRenderer {
+  /**
+   * 渲染预测预览消息
+   */
+  static renderPreview(prediction, task = null, includeRefresh = false, weights = null) {
+    const refreshButton = includeRefresh ? `\n\n🔄 点击下方按钮刷新预测` : '';
+    
+    // 数据来源说明
+    let dataSource = "";
+    if (prediction.analysisBased) {
+      dataSource = `📊 基于 ${prediction.totalHistoryRecords} 期历史数据深度分析`;
+    } else {
+      dataSource = `⚠️ 无历史数据，基于静态算法生成`;
+    }
+    
+    // 权重信息
+    let weightInfo = "";
+    if (weights && prediction.analysisBased) {
+      const w = prediction.usedWeights || weights;
+      weightInfo = `\n⚙️ <b>动态权重参数</b>\n` +
+        `马尔可夫: ${w.w_markov.toFixed(1)} | 遗漏: ${w.w_omission.toFixed(1)}\n` +
+        `频率: ${w.w_freq.toFixed(1)} | 关系: ${w.w_relation.toFixed(1)}\n` +
+        `波色: ${w.w_color.toFixed(1)} | 尾数: ${w.w_tail.toFixed(1)}`;
+    }
+    
+    // 进度信息
+    let progressInfo = '';
+    if (task) {
+      if (task.status === "CALCULATING") {
+        const percent = task.targetSims > 0 ? 
+          Math.min(100, ((task.currentSims / task.targetSims) * 100).toFixed(0)) : 0;
+        const progressBar = Formatter.generateProgressBar(task.currentSims, task.targetSims);
+        
+        const timeLeft = Math.max(0, task.unlockTime - Date.now());
+        const hoursLeft = Math.floor(timeLeft / (1000 * 60 * 60));
+        const minutesLeft = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+        
+        progressInfo = `\n⏳ <b>预测生成中...</b>\n` +
+          `${progressBar} ${percent}%\n` +
+          `剩余: ${hoursLeft}时 ${minutesLeft}分`;
+      } else if (task.status === "DONE") {
+        const sentStatus = task.isSent ? "✅ 已推送" : "🔄 待推送";
+        progressInfo = `\n✅ <b>预测已完成</b>\n${sentStatus}`;
+      }
+    }
+    
+    // 主要预测内容
+    const mainContent = `
+<b>🔮 ${CONFIG.SYSTEM.NAME} - 智能预测</b>
+第 <b>${prediction.nextExpect}</b> 期
+────────────────
+${dataSource}${progressInfo}${weightInfo}
+
+🐭 <b>生肖推荐</b>
+${CONFIG.EMOJI.fire} 主推: [ ${prediction.zodiac.main.join(" ")} ]
+${CONFIG.EMOJI.shield} 防守: [ ${prediction.zodiac.guard.join(" ")} ]
+
+🎨 <b>波色参考</b>
+主${CONFIG.EMOJI[prediction.color.main]} / 防${CONFIG.EMOJI[prediction.color.guard]}
+
+🔢 <b>特码围猎</b>
+头数: ${prediction.head.main} | 尾数: [ ${prediction.tail.join(", ")} ]
+形态: ${prediction.shape}
+
+📊 <b>金胆示例</b>: ${prediction.exampleNumber} (${prediction.exampleZodiac}/${CONFIG.EMOJI[prediction.exampleColor]})
+────────────────
+${CONFIG.EMOJI.bot} <b>算法版本</b>: ${prediction.algorithmVersion}
+<b>置信度</b>: ${prediction.confidence}%
+<b>生成时间</b>: ${new Date(prediction.generatedAt).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
+${refreshButton}
+    `.trim();
+
+    if (includeRefresh) {
+      return {
+        text: mainContent,
+        keyboard: {
+          inline_keyboard: [[
+            { text: `${CONFIG.EMOJI.sync} 刷新预测结果`, callback_data: "refresh_preview" },
+            { text: `${CONFIG.EMOJI.chart} 查看详情`, callback_data: "view_details" }
+          ]]
+        }
+      };
+    }
+
+    return { text: mainContent, keyboard: null };
+  }
+
+  /**
+   * 渲染详细预测信息
+   */
+  static renderPredictionDetails(prediction) {
+    // 生肖分数详情
+    let zodiacDetails = "<b>🐭 生肖评分详情:</b>\n";
+    const sortedZodiacScores = Object.entries(prediction.zodiac.scores || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+    
+    sortedZodiacScores.forEach(([zodiac, score], index) => {
+      const rank = index + 1;
+      const isMain = prediction.zodiac.main.includes(zodiac);
+      const isGuard = prediction.zodiac.guard.includes(zodiac);
+      const tag = isMain ? "🔥" : (isGuard ? "🛡️" : "");
+      zodiacDetails += `${rank}. ${zodiac}: ${score.toFixed(1)}分 ${tag}\n`;
+    });
+    
+    // 波色分数详情
+    let colorDetails = "<b>🎨 波色评分详情:</b>\n";
+    const sortedColorScores = Object.entries(prediction.color.scores || {})
+      .sort((a, b) => b[1] - a[1]);
+    
+    sortedColorScores.forEach(([color, score], index) => {
+      const isMain = prediction.color.main === color;
+      const isGuard = prediction.color.guard === color;
+      const tag = isMain ? "🔥" : (isGuard ? "🛡️" : "");
+      colorDetails += `${CONFIG.EMOJI[color]} ${color}: ${score.toFixed(1)}分 ${tag}\n`;
+    });
+    
+    // 尾数详情
+    let tailDetails = "<b>🔢 尾数评分详情 (Top 5):</b>\n";
+    const sortedTailScores = Object.entries(prediction.tailScores || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+    
+    sortedTailScores.forEach(([tail, score], index) => {
+      const isSelected = prediction.tail.includes(parseInt(tail));
+      const tag = isSelected ? "✅" : "";
+      tailDetails += `${tail}尾: ${score.toFixed(1)}分 ${tag}\n`;
+    });
+    
+    const details = `
+<b>📋 预测算法详情分析</b>
+────────────────
+${zodiacDetails}
+────────────────
+${colorDetails}
+────────────────
+${tailDetails}
+────────────────
+<b>📈 算法权重参数:</b>
+${Object.entries(prediction.usedWeights || {}).map(([key, value]) => 
+  `${key}: ${value.toFixed(2)}`
+).join(" | ")}
+
+<b>🧮 数据统计:</b>
+历史记录: ${prediction.totalHistoryRecords} 期
+生成时间: ${new Date(prediction.generatedAt).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
+算法版本: ${prediction.algorithmVersion}
+    `.trim();
+    
+    return {
+      text: details,
+      keyboard: {
+        inline_keyboard: [[
+          { text: "🔙 返回预测", callback_data: "back_to_preview" }
+        ]]
+      }
+    };
+  }
+
+  /**
+   * 渲染复盘报告
+   */
+  static renderBacktestReport(inputExpect, targetExpect, prediction, actualResult, evaluation, learnMsg = "") {
+    const actualSpecial = parseInt(actualResult.open_code.split(",")[6]);
+    const actAttr = Formatter.getAttributes(actualSpecial);
+    
+    const isZodiacWin = prediction.zodiac.main.includes(actAttr.zodiac);
+    const isZodiacGuardWin = prediction.zodiac.guard.includes(actAttr.zodiac);
+    const isColorWin = prediction.color.main === actAttr.color || prediction.color.guard === actAttr.color;
+    const isTailWin = prediction.tail.includes(actualSpecial % 10);
+    const isHeadWin = parseInt(prediction.head.main) === Math.floor(actualSpecial / 10);
+    const isShapeWin = prediction.shape === ((actualSpecial >= 25 ? "大" : "小") + (actualSpecial % 2 !== 0 ? "单" : "双"));
+    
+    const zodiacResult = isZodiacWin ? CONFIG.EMOJI.win + " 主中!" : 
+                        (isZodiacGuardWin ? "🆗 防中" : CONFIG.EMOJI.loss + " 未中");
+    const colorResult = isColorWin ? CONFIG.EMOJI.win + " 命中" : CONFIG.EMOJI.loss + " 未中";
+    const tailResult = isTailWin ? CONFIG.EMOJI.win + " 命中" : CONFIG.EMOJI.loss + " 未中";
+    
+    return `
+<b>📉 时光机复盘报告</b>
+基准期号: ${inputExpect}
+预测目标: <b>${targetExpect}</b>
+────────────────
+<b>1️⃣ 生肖验证</b>
+预测: 🔥[${prediction.zodiac.main.join(" ")}] 🛡[${prediction.zodiac.guard.join(" ")}]
+开奖: <b>${actAttr.zodiac}</b> ${zodiacResult}
+
+<b>2️⃣ 波色验证</b>
+预测: 主${CONFIG.EMOJI[prediction.color.main]} 防${CONFIG.EMOJI[prediction.color.guard]}
+开奖: ${CONFIG.EMOJI[actAttr.color]} ${colorResult}
+
+<b>3️⃣ 尾数验证</b>
+预测: [${prediction.tail.join(", ")}]
+开奖: ${actualSpecial % 10}尾 ${tailResult}
+
+<b>4️⃣ 其他验证</b>
+头数: ${isHeadWin ? CONFIG.EMOJI.win : CONFIG.EMOJI.loss} | 形态: ${isShapeWin ? CONFIG.EMOJI.win : CONFIG.EMOJI.loss}
+────────────────
+<b>📝 真实开奖</b>: ${Formatter.formatOpenCode(actualResult.open_code)}
+特码: ${actualSpecial} (${actAttr.zodiac}/${CONFIG.EMOJI[actAttr.color]})
+────────────────
+<b>📈 综合评分</b>
+得分: ${evaluation.totalScore}/100
+等级: ${evaluation.grade}
+置信度: ${prediction.confidence}%
+────────────────
+${learnMsg}
+<b>⏰ 复盘时间</b>: ${Formatter.formatBeijingTime()}
+    `.trim();
+  }
+
+  /**
+   * 渲染战绩统计
+   */
+  static renderScoreboard(archives, stats) {
+    if (!archives || archives.length === 0) {
+      return `<b>${CONFIG.EMOJI.score} 预测战绩</b>\n\n暂无已开奖的战绩记录。`;
+    }
+    
+    let message = `<b>${CONFIG.EMOJI.score} 近期预测战绩</b>\n\n`;
+    
+    // 显示最近10期
+    const recentArchives = archives.slice(0, 10);
+    
+    recentArchives.forEach(archive => {
+      const icon = archive.result_status === "WIN" ? CONFIG.EMOJI.win : CONFIG.EMOJI.loss;
+      const detail = archive.hit_detail || "无详情";
+      message += `第 ${archive.expect} 期: ${icon} ${detail}\n`;
+    });
+    
+    // 统计信息
+    if (stats) {
+      message += `\n────────────────\n`;
+      message += `<b>📊 统计概览</b>\n`;
+      message += `总场次: ${stats.totalMatches}\n`;
+      message += `胜利场次: ${stats.wins} (${stats.winRate}%)\n`;
+      message += `平均得分: ${stats.avgScore.toFixed(1)}\n`;
+      message += `最高得分: ${stats.maxScore}\n`;
+      message += `最近连胜: ${stats.currentStreak}\n`;
+      message += `最长连胜: ${stats.maxStreak}\n`;
+    }
+    
+    message += `\n<b>📅 统计时间</b>: ${Formatter.formatBeijingTime()}`;
+    
+    return message;
+  }
+
+  /**
+   * 渲染系统状态
+   */
+  static renderSystemStatus(stats, settings, task) {
+    let message = `<b>${CONFIG.EMOJI.bell} 系统状态报告</b>\n\n`;
+    
+    // 数据统计
+    message += `<b>📊 数据统计</b>\n`;
+    message += `历史记录: ${stats.historyCount} 期\n`;
+    message += `预测归档: ${stats.archiveCount} 次\n`;
+    message += `数据范围: ${stats.earliestExpect || "无"} - ${stats.latestExpect || "无"}\n`;
+    
+    // 任务状态
+    message += `\n<b>🔄 当前任务</b>\n`;
+    if (task) {
+      const statusText = task.status === "DONE" ? "已完成" : 
+                        task.status === "CALCULATING" ? "计算中" : "等待中";
+      const sentText = task.isSent ? "已推送" : "未推送";
+      
+      message += `期号: ${task.expect}\n`;
+      message += `状态: ${statusText} | ${sentText}\n`;
+      
+      if (task.status === "CALCULATING") {
+        const progress = task.targetSims > 0 ? 
+          ((task.currentSims / task.targetSims) * 100).toFixed(1) : 0;
+        const progressBar = Formatter.generateProgressBar(task.currentSims, task.targetSims);
+        message += `进度: ${progressBar} ${progress}%\n`;
+      }
+    } else {
+      message += `无活动任务\n`;
+    }
+    
+    // 系统设置
+    message += `\n<b>⚙️ 系统设置</b>\n`;
+    message += `自动推送: ${settings.AUTO_PUSH === "ON" ? "开启" : "关闭"}\n`;
+    
+    if (settings.AUTO_PUSH === "ON") {
+      message += `定时推送: ${Formatter.formatTime(settings.SCHEDULE_TIME)}\n`;
+      if (settings.SCHEDULE_TIME !== "OFF") {
+        const lastPush = settings.LAST_SCHEDULE_PUSH || "从未推送";
+        message += `上次定时: ${lastPush}\n`;
+      }
+    }
+    
+    message += `运算时长: ${parseInt(settings.DURATION || CONFIG.SYSTEM.DEFAULT_DURATION) / 3600000}小时\n`;
+    
+    // 算法信息
+    message += `\n<b>🧠 算法信息</b>\n`;
+    message += `系统版本: ${CONFIG.SYSTEM.VERSION}\n`;
+    
+    try {
+      const weights = settings.ALGO_WEIGHTS ? JSON.parse(settings.ALGO_WEIGHTS) : CONFIG.DEFAULT_ALGO_WEIGHTS;
+      message += `权重版本: v${weights._version || "1.0"}\n`;
+    } catch (e) {
+      message += `权重版本: 默认\n`;
+    }
+    
+    // 同步信息
+    message += `\n<b>🔄 同步信息</b>\n`;
+    message += `上次同步: ${settings.LAST_SYNC || "从未同步"}\n`;
+    message += `总同步次数: ${settings.TOTAL_SYNCS || "0"}\n`;
+    message += `总推送次数: ${settings.TOTAL_PUSHES || "0"}\n`;
+    
+    message += `\n<b>⏰ 报告时间</b>: ${Formatter.formatBeijingTime()}`;
+    
+    return message;
+  }
+
+  /**
+   * 渲染帮助信息
+   */
+  static renderHelp() {
+    return `
+<b>${CONFIG.EMOJI.help} ${CONFIG.SYSTEM.NAME} 使用帮助</b>
+
+<u>核心功能</u>
+<b>1. 智能预测</b>
+点击"${BTNS.PREVIEW}"查看最新预测
+点击"${BTNS.REC}"查看历史开奖记录
+
+<b>2. 时光机复盘</b>
+发送 <code>复盘 期号</code>
+例如: <code>复盘 2024130</code>
+系统会回到该期，模拟预测并学习
+
+<b>3. 战绩统计</b>
+点击"${BTNS.SCORE}"查看历史预测准确率
+
+<u>管理员功能</u>
+<b>1. 数据管理</b>
+"${BTNS.SYNC}": 从URL同步历史数据
+"${BTNS.RESET}": 重置当前预测任务
+
+<b>2. 推送设置</b>
+"${BTNS.AUTO}": 切换自动推送
+"${BTNS.SCHEDULE}": 设置定时推送时间
+"${BTNS.PUSH}": 立即推送预测
+
+<b>3. 系统设置</b>
+"${BTNS.TIME}": 设置运算时长
+"${BTNS.LEARN}": 强制学习最新数据
+"${BTNS.STATUS}": 查看系统状态
+
+<u>AI助手</u>
+点击"AI助手"按钮进入聊天模式
+可咨询数据分析、算法原理等问题
+
+<u>使用示例</u>
+1. 查看预测: 点击"${BTNS.PREVIEW}"
+2. 复盘学习: 发送"复盘 2024120"
+3. 同步数据: 点击"${BTNS.SYNC}"
+4. 设置定时: 点击"${BTNS.SCHEDULE}" → "定时 20:00"
+
+<b>📞 技术支持</b>
+系统版本: ${CONFIG.SYSTEM.VERSION}
+算法: 马尔可夫链 + 遗漏值回归 + 动态权重
+数据源: 配置的URL接口
+    `.trim();
+  }
+
+  /**
+   * 渲染定时设置界面
+   */
+  static renderScheduleSettings(currentTime, lastPush) {
+    return `
+<b>${CONFIG.EMOJI.calendar} 定时推送设置</b>
+
+<u>当前设置</u>
+定时时间: ${Formatter.formatTime(currentTime)}
+上次推送: ${lastPush || "从未推送"}
+
+<u>设置说明</u>
+1. 点击下方按钮快速设置常用时间
+2. 或发送 <code>定时 HH:MM</code> 自定义时间
+   例如: <code>定时 09:30</code>
+3. 发送 <code>定时关闭</code> 关闭定时推送
+4. 点击"查看定时"查看当前设置
+
+<u>注意事项</u>
+• 需要先开启"自动推送"
+• 使用北京时间 (UTC+8)
+• 每天只会在设定时间推送一次
+• 如果到时预测未完成，会等待下次
+    `.trim();
+  }
+}
+
+// ==============================================================================
+// 7. 外部接口封装 (External Integrations) - 完整版
+// ==============================================================================
+
+class ExternalService {
+  /**
+   * 发送 Telegram 消息
+   */
+  static async sendMessage(env, chatId, text, keyboard = null, parseMode = "HTML") {
+    const body = {
+      chat_id: chatId,
+      text: text,
+      parse_mode: parseMode,
+      disable_web_page_preview: true,
+      disable_notification: false
+    };
+    
+    if (keyboard) body.reply_markup = keyboard;
+
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      
+      const result = await response.json();
+      
+      if (!response.ok) {
+        Logger.error("Telegram", `sendMessage failed: ${result.description}`, result);
+        return null;
+      }
+      
+      return result;
+    } catch (error) {
+      Logger.error("Telegram", "sendMessage network error", error);
+      return null;
+    }
+  }
+
+  /**
+   * 编辑 Telegram 消息
+   */
+  static async editMessage(env, chatId, messageId, text, keyboard = null) {
+    const body = {
+      chat_id: chatId,
+      message_id: messageId,
+      text: text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true
+    };
+    
+    if (keyboard) body.reply_markup = keyboard;
+
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/editMessageText`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      
+      const result = await response.json();
+      
+      if (!response.ok) {
+        Logger.error("Telegram", `editMessage failed: ${result.description}`, result);
+        return null;
+      }
+      
+      return result;
+    } catch (error) {
+      Logger.error("Telegram", "editMessage network error", error);
+      return null;
+    }
+  }
+
+  /**
+   * 回答回调查询
+   */
+  static async answerCallbackQuery(env, callbackQueryId, text = "处理中...", showAlert = false) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: callbackQueryId,
+          text: text,
+          show_alert: showAlert
+        })
+      });
+      
+      return await response.json();
+    } catch (error) {
+      Logger.error("Telegram", "answerCallbackQuery failed", error);
+      return null;
+    }
+  }
+
+  /**
+   * 从 URL 同步历史数据
+   */
+  static async syncHistoryFromUrl(env) {
+    if (!env.LOTTERY_DATA_URL) {
+      return { success: false, error: '未配置 LOTTERY_DATA_URL 环境变量' };
+    }
+
+    try {
+      Logger.info("Sync", `开始从 ${env.LOTTERY_DATA_URL} 同步数据`);
+      
+      const response = await fetch(env.LOTTERY_DATA_URL, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) MarkSixBot/5.0',
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        timeout: 30000
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('响应不是有效的JSON格式');
+      }
+
+      const data = await response.json();
+      let records = [];
+
+      // 多种数据格式兼容
+      if (data.result === true && Array.isArray(data.data)) {
+        // 格式1: {result: true, data: [...]}
+        Logger.info("Sync", `检测到标准格式，共 ${data.data.length} 条记录`);
+        records = this.parseRecordsFormat1(data.data);
+      } else if (Array.isArray(data)) {
+        // 格式2: [...]
+        Logger.info("Sync", `检测到数组格式，共 ${data.length} 条记录`);
+        records = this.parseRecordsFormat2(data);
+      } else if (data.data && Array.isArray(data.data)) {
+        // 格式3: {data: [...]}
+        Logger.info("Sync", `检测到data数组格式，共 ${data.data.length} 条记录`);
+        records = this.parseRecordsFormat2(data.data);
+      } else {
+        throw new Error('不支持的JSON格式');
+      }
+
+      if (records.length === 0) {
+        return { success: false, error: '未解析到有效开奖记录' };
+      }
+
+      // 排序（从新到旧）
+      records.sort((a, b) => parseInt(b.expect) - parseInt(a.expect));
+
+      // 过滤新数据
+      const latestInDB = await DB.getLatestExpect(env);
+      let newRecords = [];
+
+      if (latestInDB) {
+        newRecords = records.filter(r => parseInt(r.expect) > parseInt(latestInDB));
+        Logger.info("Sync", `数据库最新期号: ${latestInDB}, 发现 ${newRecords.length} 条新记录`);
+      } else {
+        newRecords = records;
+        Logger.info("Sync", `数据库为空，所有 ${records.length} 条记录都是新的`);
+      }
+
+      if (newRecords.length === 0) {
+        return { 
+          success: true, 
+          total: records.length, 
+          added: 0, 
+          newCount: 0,
+          message: '没有发现新记录，数据已是最新' 
+        };
+      }
+
+      // 插入时按正序（从旧到新）
+      newRecords.sort((a, b) => parseInt(a.expect) - parseInt(b.expect));
+      const saveResult = await DB.batchAddHistory(env, newRecords);
+
+      if (saveResult.success && saveResult.added > 0) {
+        // 更新同步统计
+        const totalSyncs = parseInt(await DB.getSetting(env, "TOTAL_SYNCS", "0")) + 1;
+        await DB.saveSetting(env, "TOTAL_SYNCS", totalSyncs.toString());
+        await DB.saveSetting(env, "LAST_SYNC", Formatter.formatBeijingTime());
+      }
+
+      return {
+        success: saveResult.success,
+        total: records.length,
+        added: saveResult.added || 0,
+        skipped: saveResult.skipped || 0,
+        newCount: newRecords.length,
+        latestInDB: latestInDB,
+        error: saveResult.error
+      };
+
+    } catch (error) {
+      Logger.error("Sync", "同步历史数据失败", error);
+      return { 
+        success: false, 
+        error: error.message || '未知错误',
+        stack: error.stack
+      };
+    }
+  }
+
+  /**
+   * 解析数据格式1
+   */
+  static parseRecordsFormat1(dataArray) {
+    const records = [];
+    
+    for (const item of dataArray) {
+      try {
+        if (item.expect && item.openCode) {
+          const expect = item.expect.toString().trim();
+          const codeStr = item.openCode.toString().trim();
+          
+          const numbers = codeStr.split(/[,\s]+/)
+            .map(n => parseInt(n))
+            .filter(n => !isNaN(n) && n >= 1 && n <= 49);
+          
+          if (numbers.length === 7) {
+            records.push({
+              expect: expect,
+              open_code: numbers.map(n => n.toString().padStart(2, '0')).join(","),
+              raw: item
+            });
+          }
+        }
+      } catch (e) {
+        Logger.warn("Sync", `解析记录失败: ${JSON.stringify(item).substring(0, 100)}`);
+      }
+    }
+    
+    return records;
+  }
+
+  /**
+   * 解析数据格式2
+   */
+  static parseRecordsFormat2(dataArray) {
+    const records = [];
+    
+    for (const item of dataArray) {
+      try {
+        const expect = (item.expect || item.issue || item.code).toString().trim();
+        const codeStr = (item.open_code || item.openCode || item.code_number || item.number).toString().trim();
+        
+        if (!expect || !codeStr) continue;
+        
+        const numbers = codeStr.split(/[,\s]+/)
+          .map(n => parseInt(n))
+          .filter(n => !isNaN(n) && n >= 1 && n <= 49);
+        
+        if (numbers.length === 7) {
+          records.push({
+            expect: expect,
+            open_code: numbers.map(n => n.toString().padStart(2, '0')).join(","),
+            raw: item
+          });
+        }
+      } catch (e) {
+        Logger.warn("Sync", `解析记录失败: ${JSON.stringify(item).substring(0, 100)}`);
+      }
+    }
+    
+    return records;
+  }
+
+  /**
+   * 调用AI服务
+   */
+  static async callAI(env, prompt, context = null) {
+    if (!env.AI) {
+      throw new Error('AI服务未启用');
+    }
+    
+    try {
+      const messages = [];
+      
+      // 系统提示
+      messages.push({
+        role: "system",
+        content: `你是一个专业的六合彩数据分析助手。请以专业、客观、科学的态度回答用户问题。不要提供赌博建议，而是从统计学、概率学和数据分析的角度进行解释。
+        
+        你可以访问以下系统信息：
+        系统名称: ${CONFIG.SYSTEM.NAME}
+        系统版本: ${CONFIG.SYSTEM.VERSION}
+        分析算法: 马尔可夫链转移矩阵、遗漏值回归分析、动态权重调整
+        数据来源: 历史开奖记录分析
+        
+        请保持回答专业且易懂。`
+      });
+      
+      // 添加上下文（如果有）
+      if (context) {
+        messages.push({
+          role: "system",
+          content: `当前对话上下文: ${JSON.stringify(context, null, 2)}`
+        });
+      }
+      
+      // 用户问题
+      messages.push({
+        role: "user",
+        content: prompt
+      });
+      
+      const response = await env.AI.run(CONFIG.SYSTEM.AI_MODEL, { 
+        messages,
+        max_tokens: 1000
+      });
+      
+      return response.response;
+    } catch (error) {
+      Logger.error("AI", "AI调用失败", error);
+      throw error;
+    }
+  }
+}
+
+// ==============================================================================
+// 8. 业务逻辑控制器 (Business Logic Controllers) - 完整版
+// ==============================================================================
+
+class Controller {
+  /**
+   * 初始化任务
+   */
+  static async initTask(env, history) {
+    const duration = parseInt(await DB.getSetting(env, "DURATION", CONFIG.SYSTEM.DEFAULT_DURATION));
+    
+    let nextExpect = "2025001";
+    if (history.length > 0) {
+      const latestExpect = parseInt(history[0].expect);
+      nextExpect = (latestExpect + 1).toString();
+    }
+
+    const newTask = {
+      startTime: Date.now(),
+      unlockTime: Date.now() + duration,
+      expect: nextExpect,
+      status: "CALCULATING",
+      currentSims: 0,
+      targetSims: CONFIG.SYSTEM.TARGET_SIMS,
+      history: history.slice(0, 500), // 只存储最近500期，避免数据过大
+      finalPrediction: null,
+      isSent: 0,
+      predictionVersion: Date.now(),
+      algorithmVersion: "V5.0"
+    };
+
+    await DB.saveTask(env, newTask);
+    Logger.info("Task", `初始化任务: 期号 ${nextExpect}, 解锁时间 ${new Date(newTask.unlockTime).toLocaleString('zh-CN')}`);
+    return newTask;
+  }
+
+  /**
+   * 处理历史记录查看
+   */
+  static async handleHistory(env, chatId, page = 1, messageId = null) {
+    const RECORDS_PER_PAGE = 10;
+    const offset = (page - 1) * RECORDS_PER_PAGE;
+
+    const history = await DB.getHistory(env, RECORDS_PER_PAGE, offset);
+    if (!history || history.length === 0) {
+      const txt = `📊 <b>${CONFIG.SYSTEM.NAME}</b>\n暂无开奖历史记录，请先到管理菜单同步数据。`;
+      if (messageId) await ExternalService.editMessage(env, chatId, messageId, txt);
+      else await ExternalService.sendMessage(env, chatId, txt);
+      return;
+    }
+
+    const totalRecords = await DB.getHistoryCount(env);
+    const totalPages = Math.ceil(totalRecords / RECORDS_PER_PAGE);
+
+    let message = `<b>${CONFIG.EMOJI.history} 历史开奖记录</b>\n`;
+    message += `第 ${page}/${totalPages} 页 | 共 ${totalRecords} 期\n`;
+    message += `────────────────\n`;
+
+    history.forEach(r => {
+      const special = parseInt(r.open_code.split(",")[6]);
+      const attr = Formatter.getAttributes(special);
+      message += `第 <b>${r.expect}</b> 期: ${Formatter.formatOpenCode(r.open_code)} | ${attr.zodiac}${CONFIG.EMOJI[attr.color]}\n`;
+    });
+
+    // 翻页键盘
+    const keyboard = { inline_keyboard: [] };
+    const navRow = [];
+    
+    if (page > 1) {
+      navRow.push({ text: "◀️ 上一页", callback_data: `history_page_${page - 1}` });
+    }
+    
+    navRow.push({ text: `📄 ${page}/${totalPages}`, callback_data: "current_page" });
+    
+    if (page < totalPages) {
+      navRow.push({ text: "下一页 ▶️", callback_data: `history_page_${page + 1}` });
+    }
+    
+    keyboard.inline_keyboard.push(navRow);
+    keyboard.inline_keyboard.push([{ text: "🔙 返回菜单", callback_data: "back_to_menu" }]);
+
+    if (messageId) {
+      await ExternalService.editMessage(env, chatId, messageId, message, keyboard);
+    } else {
+      await ExternalService.sendMessage(env, chatId, message, keyboard);
+    }
+  }
+
+  /**
+   * 处理预测预览
+   */
+  static async handlePreview(env, chatId, messageId = null) {
+    try {
+      Logger.info("Preview", `处理预览请求，chatId: ${chatId}`);
+      
+      let task = await DB.getTask(env);
+
+      // 如果没有任务，尝试初始化一个
+      if (!task) {
+        const history = await DB.getHistory(env);
+        if (history.length > 0) {
+          task = await Controller.initTask(env, history);
+          Logger.info("Preview", `初始化新任务: ${task.expect}`);
+        } else {
+          const message = `🔮 <b>${CONFIG.SYSTEM.NAME}</b>\n当前无历史数据，无法生成预测。请先同步数据。`;
+          
+          if (messageId) {
+            await ExternalService.editMessage(env, chatId, messageId, message);
+          } else {
+            await ExternalService.sendMessage(env, chatId, message);
+          }
+          return;
+        }
+      }
+
+      // 获取数据和权重
+      const allHistory = await DB.getHistory(env);
+      const historicalAnalysis = MathEngine.analyzeBasicStats(allHistory);
+      const weights = await DB.getWeights(env);
+      
+      // 更新任务进度（模拟）
+      if (task.status === "CALCULATING") {
+        const timePassed = Date.now() - task.startTime;
+        const totalDuration = task.unlockTime - task.startTime;
+        const progress = Math.min(1, timePassed / totalDuration);
+        
+        task.currentSims = Math.min(task.targetSims, Math.floor(progress * task.targetSims));
+        
+        if (Date.now() >= task.unlockTime) {
+          task.status = "DONE";
+          task.currentSims = task.targetSims;
+        }
+        
+        await DB.saveTask(env, task);
+      }
+
+      // 生成预测
+      let prediction;
+      if (task.finalPrediction && task.status === "DONE") {
+        // 使用已完成的预测
+        prediction = task.finalPrediction;
+        Logger.debug("Preview", `使用已保存的预测: ${task.expect}`);
+      } else {
+        // 生成新预测
+        const determinants = MathEngine.analyzeDeterminants(allHistory);
+        prediction = PredictionEngine.generate(task, historicalAnalysis, weights, determinants);
+        
+        // 如果任务已完成，保存预测结果
+        if (task.status === "DONE") {
+          task.finalPrediction = prediction;
+          await DB.saveTask(env, task);
+          await DB.archivePrediction(env, task.expect, prediction);
+          Logger.info("Preview", `预测完成并保存: ${task.expect}`);
+        }
+      }
+
+      // 渲染消息
+      const msgData = MessageRenderer.renderPreview(prediction, task, true, weights);
+      
+      if (messageId) {
+        await ExternalService.editMessage(env, chatId, messageId, msgData.text, msgData.keyboard);
+      } else {
+        await ExternalService.sendMessage(env, chatId, msgData.text, msgData.keyboard);
+      }
+      
+      Logger.info("Preview", `预览发送完成: ${task.expect}, 置信度: ${prediction.confidence}%`);
+      
+    } catch (error) {
+      Logger.error("Preview", "处理预览失败", error);
+      
+      const errorMessage = `❌ <b>生成预览时发生错误</b>\n\n错误信息: <code>${error.message}</code>\n\n请稍后重试或联系管理员。`;
+      
+      if (messageId) {
+        await ExternalService.editMessage(env, chatId, messageId, errorMessage);
+      } else {
+        await ExternalService.sendMessage(env, chatId, errorMessage);
+      }
+    }
+  }
+
+  /**
+   * 处理复盘回测与学习
+   */
+  static async handleBacktest(env, chatId, inputExpect) {
+    try {
+      Logger.info("Backtest", `开始复盘: ${inputExpect}, chatId: ${chatId}`);
+      
+      const allHistory = await DB.getHistory(env);
+      if (!allHistory || allHistory.length === 0) {
+        await ExternalService.sendMessage(env, chatId, "❌ 数据库为空，无法执行复盘。请先同步历史数据。");
+        return;
+      }
+
+      // 1. 定位期号
+      const index = allHistory.findIndex(h => h.expect === inputExpect.toString());
+      
+      if (index === -1) {
+        await ExternalService.sendMessage(env, chatId, `❌ 未找到第 ${inputExpect} 期的记录。请检查期号是否正确。`);
+        return;
+      }
+
+      if (index === 0) {
+        await ExternalService.sendMessage(env, chatId, `⚠️ 第 ${inputExpect} 期是最新一期，没有未来数据可供验证。请选择更早的期数。`);
+        return;
+      }
+
+      // 2. 切割数据
+      const pastHistory = allHistory.slice(index); // 从该期开始的历史
+      const actualResultRecord = allHistory[index - 1]; // 要预测的那一期
+      const targetExpect = actualResultRecord.expect;
+
+      // 发送开始消息
+      await ExternalService.sendMessage(env, chatId, 
+        `⏳ <b>启动时光机...</b>\n\n` +
+        `回退至: 第 ${inputExpect} 期\n` +
+        `预测目标: 第 ${targetExpect} 期\n` +
+        `历史数据: ${pastHistory.length} 期\n\n` +
+        `正在应用当前算法进行模拟预测...`
+      );
+
+      // 3. 获取权重
+      const weights = await DB.getWeights(env);
+
+      // 4. 执行预测
+      const prediction = await PredictionEngine.generateBacktestPrediction(env, targetExpect, pastHistory);
+      
+      // 5. 验证结果
+      const actSpecial = parseInt(actualResultRecord.open_code.split(",")[6]);
+      const evaluation = PredictionEngine.evaluatePrediction(prediction, actSpecial);
+
+      // 6. 自主学习逻辑
+      let learnMsg = "";
+      const actAttr = Formatter.getAttributes(actSpecial);
+      
+      if (!evaluation.zodiacHit.main && !evaluation.zodiacHit.guard) {
+        // 生肖预测失败，分析原因并调整权重
+        learnMsg = `\n───────────────\n🧠 <b>自主学习分析</b>\n`;
+        learnMsg += `预测失败。真实生肖为 <b>${actAttr.zodiac}</b>。\n`;
+        learnMsg += `系统正在分析失败原因并优化算法...\n\n`;
+
+        // 深度原因分析
+        const determinants = MathEngine.analyzeDeterminants(pastHistory);
+        const lastZodiac = Formatter.getAttributes(parseInt(pastHistory[0].open_code.split(",")[6])).zodiac;
+
+        // 检查马尔可夫关联性
+        const transitions = determinants.transitionMatrix[lastZodiac] || {};
+        const transCount = transitions[actAttr.zodiac] || 0;
+        const totalTransitions = Object.values(transitions).reduce((a, b) => a + b, 0);
+
+        // 检查遗漏值
+        const omission = determinants.omission[actAttr.zodiac] || 0;
+
+        let adjusted = false;
+        let adjustmentLog = [];
+
+        // 策略 A: 发现马尔可夫强关联漏判 -> 提高马尔可夫权重
+        if (transCount > 0 && totalTransitions > 0) {
+          const transProb = transCount / totalTransitions;
+          if (transProb > 0.2) { // 转移概率超过20%
+            weights.w_markov = parseFloat((weights.w_markov + 0.15).toFixed(2));
+            adjustmentLog.push(`马尔可夫权重 +0.15 (转移概率: ${(transProb*100).toFixed(1)}%)`);
+            adjusted = true;
+          }
+        }
+
+        // 策略 B: 发现遗漏值异常 -> 调整遗漏权重
+        if (omission > 15) {
+          // 极冷反弹漏判
+          weights.w_omission = parseFloat((weights.w_omission + 0.2).toFixed(2));
+          adjustmentLog.push(`遗漏权重 +0.20 (遗漏: ${omission}期)`);
+          adjusted = true;
+        } else if (omission <= 3) {
+          // 热号连开漏判
+          weights.w_omission = parseFloat((weights.w_omission - 0.1).toFixed(2));
+          weights.w_freq = parseFloat((weights.w_freq + 0.1).toFixed(2));
+          adjustmentLog.push(`遗漏权重 -0.10，频率权重 +0.10 (遗漏: ${omission}期)`);
+          adjusted = true;
+        }
+
+        // 策略 C: 检查生肖关系
+        if (CONFIG.RELATIONS.LIU_HE[lastZodiac] === actAttr.zodiac) {
+          // 六合关系漏判
+          weights.w_relation = parseFloat((weights.w_relation + 0.15).toFixed(2));
+          adjustmentLog.push(`关系权重 +0.15 (六合关系)`);
+          adjusted = true;
+        } else if (CONFIG.RELATIONS.SAN_HE[lastZodiac]?.includes(actAttr.zodiac)) {
+          // 三合关系漏判
+          weights.w_relation = parseFloat((weights.w_relation + 0.1).toFixed(2));
+          adjustmentLog.push(`关系权重 +0.10 (三合关系)`);
+          adjusted = true;
+        }
+
+        // 策略 D: 默认微调
+        if (!adjusted) {
+          // 基础频率调整
+          weights.w_freq = parseFloat((weights.w_freq + 0.05).toFixed(2));
+          adjustmentLog.push(`频率权重 +0.05 (常规优化)`);
+        }
+
+        // 持久化新权重
+        await DB.saveWeights(env, weights);
+        
+        // 添加版本标记
+        weights._version = (parseFloat(weights._version || "1.0") + 0.01).toFixed(2);
+        await DB.saveWeights(env, weights);
+
+        // 构建调整日志
+        if (adjustmentLog.length > 0) {
+          learnMsg += `<b>算法调整记录:</b>\n`;
+          adjustmentLog.forEach(log => {
+            learnMsg += `➤ ${log}\n`;
+          });
+        }
+        
+        learnMsg += `\n✅ <b>算法核心参数已更新！</b>\n`;
+        learnMsg += `新权重版本: v${weights._version}\n`;
+        learnMsg += `再次复盘此期将应用新逻辑，结果可能改变。`;
+
+      } else {
+        learnMsg = `\n───────────────\n🧠 <b>自主学习分析</b>\n`;
+        if (evaluation.zodiacHit.main) {
+          learnMsg += `✅ 预测准确！主推生肖命中，当前算法表现优秀。\n`;
+        } else {
+          learnMsg += `🆗 预测部分准确，防守生肖命中，算法表现良好。\n`;
+        }
+        learnMsg += `当前算法权重配置合理，保持不变。`;
+        
+        // 小幅优化优胜参数
+        if (evaluation.totalScore >= 70) {
+          // 表现优秀，强化当前配置
+          const boostAmount = 0.02;
+          Object.keys(weights).forEach(key => {
+            if (!key.startsWith('_') && typeof weights[key] === 'number') {
+              weights[key] = parseFloat((weights[key] + boostAmount).toFixed(2));
+            }
+          });
+          await DB.saveWeights(env, weights);
+          learnMsg += `\n\n💪 <b>小幅强化优胜参数</b> (各权重+${boostAmount})`;
+        }
+      }
+
+      // 7. 发送报告
+      const report = MessageRenderer.renderBacktestReport(
+        inputExpect, targetExpect, prediction, actualResultRecord, evaluation, learnMsg
+      );
+
+      await ExternalService.sendMessage(env, chatId, report);
+      
+      Logger.info("Backtest", `复盘完成: ${inputExpect} → ${targetExpect}, 得分: ${evaluation.totalScore}, 等级: ${evaluation.grade}`);
+
+    } catch (error) {
+      Logger.error("Backtest", "复盘处理失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>复盘过程中发生错误</b>\n\n错误信息: <code>${error.message}</code>\n\n请检查期号是否正确或稍后重试。`
+      );
+    }
+  }
+
+  /**
+   * 处理强制学习
+   */
+  static async handleForceLearn(env, chatId) {
+    try {
+      await ExternalService.sendMessage(env, chatId, 
+        `${CONFIG.EMOJI.learn} <b>开始强制学习...</b>\n\n` +
+        `系统将分析最近50期数据，优化算法权重。`
+      );
+      
+      const recentHistory = await DB.getRecentHistory(env, 50);
+      if (recentHistory.length < 20) {
+        await ExternalService.sendMessage(env, chatId, 
+          `❌ 历史数据不足，需要至少20期数据才能进行有效学习。\n当前仅有 ${recentHistory.length} 期数据。`
+        );
+        return;
+      }
+      
+      const allHistory = await DB.getHistory(env);
+      const weights = await DB.getWeights(env);
+      
+      // 分析最近50期的表现
+      let totalScore = 0;
+      let successfulPredictions = 0;
+      const weightAdjustments = {};
+      Object.keys(weights).forEach(key => {
+        if (!key.startsWith('_')) weightAdjustments[key] = 0;
+      });
+      
+      // 模拟最近20期的预测（跳过太近的）
+      const testCount = Math.min(20, recentHistory.length - 1);
+      
+      for (let i = 0; i < testCount; i++) {
+        const testHistory = allHistory.slice(i); // 从第i期开始的历史
+        const targetRecord = allHistory[i - 1]; // 要预测的那一期
+        
+        if (!targetRecord) continue;
+        
+        const mockTask = {
+          expect: targetRecord.expect,
+          history: testHistory,
+          startTime: Date.now(),
+          unlockTime: Date.now(),
+          status: "DONE"
+        };
+        
+        const analysis = MathEngine.analyzeBasicStats(testHistory);
+        const determinants = MathEngine.analyzeDeterminants(testHistory);
+        const prediction = PredictionEngine.generate(mockTask, analysis, weights, determinants);
+        
+        const actualSpecial = parseInt(targetRecord.open_code.split(",")[6]);
+        const evaluation = PredictionEngine.evaluatePrediction(prediction, actualSpecial);
+        
+        totalScore += evaluation.totalScore;
+        if (evaluation.zodiacHit.main || evaluation.zodiacHit.guard) {
+          successfulPredictions++;
+        }
+        
+        // 根据表现调整权重倾向
+        if (evaluation.totalScore >= 60) {
+          // 表现好，增强当前权重
+          Object.keys(weightAdjustments).forEach(key => {
+            weightAdjustments[key] += 0.01;
+          });
+        } else {
+          // 表现差，需要调整
+          const actualAttr = Formatter.getAttributes(actualSpecial);
+          const lastRecord = testHistory[0];
+          const lastSpecial = parseInt(lastRecord.open_code.split(",")[6]);
+          const lastAttr = Formatter.getAttributes(lastSpecial);
+          
+          // 分析失败原因
+          const determinants = MathEngine.analyzeDeterminants(testHistory);
+          const transitions = determinants.transitionMatrix[lastAttr.zodiac] || {};
+          const transCount = transitions[actualAttr.zodiac] || 0;
+          const omission = determinants.omission[actualAttr.zodiac] || 0;
+          
+          if (transCount > 0) {
+            // 马尔可夫关联漏判
+            weightAdjustments.w_markov += 0.02;
+          }
+          
+          if (omission > 10) {
+            // 遗漏反弹漏判
+            weightAdjustments.w_omission += 0.02;
+          }
+          
+          if (CONFIG.RELATIONS.LIU_HE[lastAttr.zodiac] === actualAttr.zodiac || 
+              CONFIG.RELATIONS.SAN_HE[lastAttr.zodiac]?.includes(actualAttr.zodiac)) {
+            // 关系漏判
+            weightAdjustments.w_relation += 0.02;
+          }
+        }
+      }
+      
+      // 应用调整
+      const avgScore = totalScore / testCount;
+      const successRate = (successfulPredictions / testCount) * 100;
+      
+      Object.keys(weightAdjustments).forEach(key => {
+        weights[key] = parseFloat((weights[key] + weightAdjustments[key]).toFixed(2));
+        // 限制范围
+        weights[key] = Math.max(0.1, Math.min(5.0, weights[key]));
+      });
+      
+      // 增加版本号
+      weights._version = (parseFloat(weights._version || "1.0") + 0.1).toFixed(2);
+      
+      await DB.saveWeights(env, weights);
+      
+      const resultMessage = 
+        `${CONFIG.EMOJI.learn} <b>强制学习完成</b>\n\n` +
+        `<b>测试统计:</b>\n` +
+        `测试期数: ${testCount} 期\n` +
+        `平均得分: ${avgScore.toFixed(1)}/100\n` +
+        `生肖命中率: ${successRate.toFixed(1)}%\n\n` +
+        `<b>权重调整:</b>\n` +
+        Object.entries(weightAdjustments)
+          .filter(([_, value]) => Math.abs(value) > 0.001)
+          .map(([key, value]) => `${key}: ${value > 0 ? '+' : ''}${value.toFixed(2)}`)
+          .join('\n') +
+        `\n\n<b>新权重版本:</b> v${weights._version}\n` +
+        `<b>学习时间:</b> ${Formatter.formatBeijingTime()}`;
+      
+      await ExternalService.sendMessage(env, chatId, resultMessage);
+      
+      Logger.info("Learn", `强制学习完成，平均得分: ${avgScore.toFixed(1)}, 命中率: ${successRate.toFixed(1)}%`);
+      
+    } catch (error) {
+      Logger.error("Learn", "强制学习失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>强制学习过程中发生错误</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理同步数据
+   */
+  static async handleSync(env, chatId) {
+    try {
+      Logger.info("Sync", `手动同步请求，chatId: ${chatId}`);
+      
+      const statusMsg = await ExternalService.sendMessage(env, chatId, 
+        `${CONFIG.EMOJI.sync} <b>正在同步历史数据...</b>\n\n` +
+        `连接数据源: ${env.LOTTERY_DATA_URL ? '已配置' : '未配置'}\n` +
+        `开始时间: ${Formatter.formatBeijingTime()}`
+      );
+      
+      const result = await ExternalService.syncHistoryFromUrl(env);
+      
+      if (result.success) {
+        const history = await DB.getHistory(env);
+        
+        // 重新初始化任务（如果之前没有）
+        let task = await DB.getTask(env);
+        if (!task && history.length > 0) {
+          task = await Controller.initTask(env, history);
+        } else if (task && history.length > 0) {
+          // 更新任务中的历史数据
+          task.history = history.slice(0, 500);
+          await DB.saveTask(env, task);
+        }
+        
+        let message = `✅ <b>数据同步完成</b>\n\n`;
+        message += `数据源总数: ${result.total} 条\n`;
+        message += `成功新增: ${result.added} 条\n`;
+        message += `跳过重复: ${result.skipped || 0} 条\n`;
+        message += `数据库总数: ${history.length} 条\n`;
+        
+        if (result.newCount > 0) {
+          message += `\n📝 <b>最新开奖记录：</b>\n`;
+          const newRecords = await DB.getHistory(env, 3);
+          newRecords.forEach(record => {
+            const special = parseInt(record.open_code.split(",")[6]);
+            const attr = Formatter.getAttributes(special);
+            message += `第 ${record.expect} 期: ${Formatter.formatOpenCode(record.open_code)} | ${attr.zodiac}${CONFIG.EMOJI[attr.color]}\n`;
+          });
+        }
+        
+        message += `\n🔄 <b>任务状态:</b> ${task ? `已更新 (${task.expect})` : '无任务'}`;
+        message += `\n⏰ <b>完成时间:</b> ${Formatter.formatBeijingTime()}`;
+        
+        await ExternalService.sendMessage(env, chatId, message, KEYBOARDS.ADMIN_MENU);
+        
+      } else {
+        await ExternalService.sendMessage(env, chatId, 
+          `❌ <b>数据同步失败</b>\n\n` +
+          `错误信息: ${result.error || '未知错误'}\n\n` +
+          `请检查:\n` +
+          `1. 数据源URL是否正确配置\n` +
+          `2. 数据源是否可访问\n` +
+          `3. 数据格式是否支持`,
+          KEYBOARDS.ADMIN_MENU
+        );
+      }
+      
+      // 删除状态消息
+      if (statusMsg && statusMsg.result && statusMsg.result.message_id) {
+        try {
+          await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/deleteMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              message_id: statusMsg.result.message_id
+            })
+          });
+        } catch (e) {
+          // 忽略删除错误
+        }
+      }
+      
+    } catch (error) {
+      Logger.error("Sync", "同步处理失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>数据同步异常</b>\n\n` +
+        `错误信息: ${error.message}`,
+        KEYBOARDS.ADMIN_MENU
+      );
+    }
+  }
+
+  /**
+   * 处理立即推送
+   */
+  static async handleForcePush(env, chatId) {
+    try {
+      let task = await DB.getTask(env);
+      
+      if (!task) {
+        const history = await DB.getHistory(env);
+        if (history.length > 0) {
+          task = await Controller.initTask(env, history);
+        } else {
+          await ExternalService.sendMessage(env, chatId, "❌ 无历史数据，无法生成推送。请先同步历史数据。");
+          return;
+        }
+      }
+
+      // 标记为完成并生成最终预测
+      task.status = "DONE";
+      task.currentSims = task.targetSims;
+      
+      const allHistory = await DB.getHistory(env);
+      const analysis = MathEngine.analyzeBasicStats(allHistory);
+      const weights = await DB.getWeights(env);
+      const determinants = MathEngine.analyzeDeterminants(allHistory);
+      
+      task.finalPrediction = PredictionEngine.generate(task, analysis, weights, determinants);
+      task.isSent = 1;
+
+      // 保存并归档
+      await DB.saveTask(env, task);
+      await DB.archivePrediction(env, task.expect, task.finalPrediction);
+      
+      // 更新推送统计
+      const totalPushes = parseInt(await DB.getSetting(env, "TOTAL_PUSHES", "0")) + 1;
+      await DB.saveSetting(env, "TOTAL_PUSHES", totalPushes.toString());
+
+      // 推送到频道
+      const msgData = MessageRenderer.renderPreview(task.finalPrediction, task, false, weights);
+      
+      let channelPushSuccess = false;
+      if (env.TG_CHANNEL_ID) {
+        try {
+          await ExternalService.sendMessage(env, env.TG_CHANNEL_ID, msgData.text);
+          channelPushSuccess = true;
+          Logger.info("Push", `预测已推送到频道: ${env.TG_CHANNEL_ID}, 期号: ${task.expect}`);
+        } catch (error) {
+          Logger.error("Push", "推送到频道失败", error);
+          channelPushSuccess = false;
+        }
+      }
+      
+      // 发送确认消息给管理员
+      let confirmMessage = `✅ <b>预测已立即推送</b>\n\n`;
+      confirmMessage += `期号: ${task.expect}\n`;
+      confirmMessage += `置信度: ${task.finalPrediction.confidence}%\n`;
+      confirmMessage += `生成时间: ${new Date().toLocaleString('zh-CN')}\n`;
+      
+      if (env.TG_CHANNEL_ID) {
+        confirmMessage += `频道推送: ${channelPushSuccess ? '成功' : '失败'}\n`;
+      }
+      
+      confirmMessage += `\n📊 <b>预测概览</b>\n`;
+      confirmMessage += `生肖: ${task.finalPrediction.zodiac.main.join(", ")}\n`;
+      confirmMessage += `波色: ${CONFIG.EMOJI[task.finalPrediction.color.main]}\n`;
+      confirmMessage += `特码示例: ${task.finalPrediction.exampleNumber}\n`;
+      
+      await ExternalService.sendMessage(env, chatId, confirmMessage);
+      
+    } catch (error) {
+      Logger.error("Push", "立即推送失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>立即推送失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理定时设置
+   */
+  static async handleScheduleSettings(env, chatId, text = null) {
+    try {
+      if (text) {
+        // 处理定时设置命令
+        if (text.toLowerCase().includes("关闭") || text === "定时关闭") {
+          await DB.saveSetting(env, "SCHEDULE_TIME", "OFF");
+          await ExternalService.sendMessage(env, chatId, 
+            `✅ 定时推送已关闭\n\n自动推送仍保持开启状态，将使用即时推送方式。`,
+            KEYBOARDS.ADMIN_MENU
+          );
+          return;
+        }
+        
+        if (text === "查看定时") {
+          const scheduleTime = await DB.getSetting(env, "SCHEDULE_TIME", "OFF");
+          const lastPush = await DB.getSetting(env, "LAST_SCHEDULE_PUSH", "从未推送");
+          
+          const message = MessageRenderer.renderScheduleSettings(scheduleTime, lastPush);
+          await ExternalService.sendMessage(env, chatId, message, KEYBOARDS.SCHEDULE_SETTINGS);
+          return;
+        }
+        
+        const timeMatch = text.match(/(\d{1,2}):(\d{2})/);
+        if (timeMatch) {
+          let hours = parseInt(timeMatch[1]);
+          let minutes = parseInt(timeMatch[2]);
+          
+          if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+            await ExternalService.sendMessage(env, chatId, 
+              `❌ 时间范围无效\n\n` +
+              `小时: 0-23，分钟: 0-59\n` +
+              `例如: <code>定时 08:00</code> 或 <code>定时 21:30</code>`,
+              KEYBOARDS.SCHEDULE_SETTINGS
+            );
+            return;
+          }
+          
+          const formattedTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+          
+          await DB.saveSetting(env, "SCHEDULE_TIME", formattedTime);
+          
+          const message = 
+            `✅ 定时推送时间已设置为: <b>${formattedTime}</b> (北京时间)\n\n` +
+            `每天 ${formattedTime} 将自动推送预测结果\n\n` +
+            `<b>注意事项:</b>\n` +
+            `• 需要先开启"自动推送"\n` +
+            `• 如果到时预测未完成，会等待下次\n` +
+            `• 每天只会在设定时间推送一次`;
+          
+          await ExternalService.sendMessage(env, chatId, message, KEYBOARDS.ADMIN_MENU);
+          return;
+        }
+      }
+      
+      // 显示定时设置界面
+      const scheduleTime = await DB.getSetting(env, "SCHEDULE_TIME", "OFF");
+      const lastPush = await DB.getSetting(env, "LAST_SCHEDULE_PUSH", "从未推送");
+      
+      const message = MessageRenderer.renderScheduleSettings(scheduleTime, lastPush);
+      await ExternalService.sendMessage(env, chatId, message, KEYBOARDS.SCHEDULE_SETTINGS);
+      
+    } catch (error) {
+      Logger.error("Schedule", "定时设置处理失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>定时设置失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理自动推送切换
+   */
+  static async handleAutoPushToggle(env, chatId) {
+    try {
+      const currentState = await DB.getSetting(env, "AUTO_PUSH", "ON");
+      const newState = currentState === "ON" ? "OFF" : "ON";
+      
+      await DB.saveSetting(env, "AUTO_PUSH", newState);
+      
+      let message = "";
+      if (newState === "ON") {
+        const scheduleTime = await DB.getSetting(env, "SCHEDULE_TIME", "OFF");
+        
+        message = `📡 <b>自动推送已开启</b>\n\n`;
+        
+        if (scheduleTime === "OFF") {
+          message += `当前未设置定时推送时间\n`;
+          message += `请点击"${BTNS.SCHEDULE}"设置定时时间\n`;
+          message += `或使用即时推送方式`;
+        } else {
+          message += `当前定时推送时间: ${scheduleTime} (北京时间)\n`;
+          message += `每天 ${scheduleTime} 自动推送预测结果`;
+        }
+      } else {
+        message = `🔇 <b>自动推送已关闭</b>\n\n`;
+        message += `定时推送功能也已自动关闭\n`;
+        message += `需要时可手动点击"${BTNS.PUSH}"推送`;
+        
+        // 同时关闭定时
+        await DB.saveSetting(env, "SCHEDULE_TIME", "OFF");
+      }
+      
+      await ExternalService.sendMessage(env, chatId, message, KEYBOARDS.ADMIN_MENU);
+      
+    } catch (error) {
+      Logger.error("AutoPush", "自动推送切换失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>自动推送设置失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理时长设置
+   */
+  static async handleTimeSetting(env, chatId, hours) {
+    try {
+      const duration = hours * 3600000;
+      await DB.saveSetting(env, "DURATION", duration.toString());
+      
+      await ExternalService.sendMessage(env, chatId, 
+        `✅ <b>运算时长已更新为: ${hours} 小时</b>\n\n` +
+        `此设置对下次任务生效。\n` +
+        `当前任务不受影响。`,
+        KEYBOARDS.ADMIN_MENU
+      );
+      
+    } catch (error) {
+      Logger.error("TimeSetting", "时长设置失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>时长设置失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理重置任务
+   */
+  static async handleReset(env, chatId) {
+    try {
+      const history = await DB.getHistory(env);
+      if (history.length === 0) {
+        await ExternalService.sendMessage(env, chatId, 
+          "❌ 无历史数据，无法重置任务。请先同步历史数据。"
+        );
+        return;
+      }
+      
+      // 重新初始化任务
+      const newTask = await Controller.initTask(env, history);
+      
+      await ExternalService.sendMessage(env, chatId, 
+        `${CONFIG.EMOJI.reset} <b>预测任务已重置</b>\n\n` +
+        `新期号: ${newTask.expect}\n` +
+        `解锁时间: ${new Date(newTask.unlockTime).toLocaleString('zh-CN')}\n` +
+        `历史数据: ${history.length} 期\n\n` +
+        `任务状态: ${newTask.status}`
+      );
+      
+      Logger.info("Reset", `任务已重置: ${newTask.expect}`);
+      
+    } catch (error) {
+      Logger.error("Reset", "重置任务失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>重置任务失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理战绩统计
+   */
+  static async handleScoreboard(env, chatId) {
+    try {
+      const archives = await DB.getArchives(env, 20); // 获取最近20期
+      
+      if (!archives || archives.length === 0) {
+        await ExternalService.sendMessage(env, chatId, 
+          `${CONFIG.EMOJI.score} <b>预测战绩</b>\n\n暂无已开奖的战绩记录。`
+        );
+        return;
+      }
+      
+      // 计算统计信息
+      let totalMatches = 0;
+      let wins = 0;
+      let totalScore = 0;
+      let maxScore = 0;
+      let currentStreak = 0;
+      let maxStreak = 0;
+      let lastWasWin = false;
+      let currentStreakCount = 0;
+      
+      // 按时间顺序（从旧到新）计算连胜
+      const archivesByDate = [...archives].reverse();
+      
+      archivesByDate.forEach(archive => {
+        totalMatches++;
+        
+        if (archive.result_status === "WIN") {
+          wins++;
+          totalScore += parseFloat(archive.hit_detail?.match(/\d+/)?.[0] || "0");
+          
+          const score = parseFloat(archive.hit_detail?.match(/\d+/)?.[0] || "0");
+          if (score > maxScore) maxScore = score;
+          
+          // 连胜计算
+          if (lastWasWin || currentStreakCount === 0) {
+            currentStreakCount++;
+            lastWasWin = true;
+          } else {
+            currentStreakCount = 1;
+            lastWasWin = true;
+          }
+        } else {
+          lastWasWin = false;
+          currentStreakCount = 0;
+        }
+        
+        if (currentStreakCount > maxStreak) {
+          maxStreak = currentStreakCount;
+        }
+      });
+      
+      // 当前连胜（最近的状态）
+      const recentArchives = archives.slice(0, 10);
+      let recentStreak = 0;
+      for (const archive of recentArchives) {
+        if (archive.result_status === "WIN") {
+          recentStreak++;
+        } else {
+          break;
+        }
+      }
+      
+      const avgScore = totalMatches > 0 ? totalScore / totalMatches : 0;
+      const winRate = totalMatches > 0 ? (wins / totalMatches * 100) : 0;
+      
+      const stats = {
+        totalMatches,
+        wins,
+        winRate: winRate.toFixed(1),
+        avgScore: avgScore.toFixed(1),
+        maxScore: maxScore.toFixed(0),
+        currentStreak: recentStreak,
+        maxStreak
+      };
+      
+      const message = MessageRenderer.renderScoreboard(archives, stats);
+      await ExternalService.sendMessage(env, chatId, message);
+      
+    } catch (error) {
+      Logger.error("Scoreboard", "战绩统计失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>获取战绩失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理系统状态
+   */
+  static async handleSystemStatus(env, chatId) {
+    try {
+      const stats = await DB.getSystemStats(env);
+      const settings = await DB.getAllSettings(env);
+      const task = await DB.getTask(env);
+      
+      if (!stats) {
+        await ExternalService.sendMessage(env, chatId, 
+          "❌ 无法获取系统状态信息"
+        );
+        return;
+      }
+      
+      const message = MessageRenderer.renderSystemStatus(stats, settings, task);
+      await ExternalService.sendMessage(env, chatId, message);
+      
+    } catch (error) {
+      Logger.error("Status", "系统状态获取失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>获取系统状态失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 处理AI聊天
+   */
+  static async handleAIChat(env, chatId, prompt) {
+    try {
+      // 首先检查是否为频道ID，如果是则直接返回
+      if (env.TG_CHANNEL_ID && String(chatId) === String(env.TG_CHANNEL_ID)) {
+        Logger.info("AIChat", `检测到频道消息，跳过AI处理: ${prompt.substring(0, 50)}...`);
+        return;
+      }
+      
+      if (!env.AI) {
+        await ExternalService.sendMessage(env, chatId, 
+          "⚠️ AI 助手功能未启用或未配置。"
+        );
+        return;
+      }
+      
+      // 发送等待消息
+      const waitMsg = await ExternalService.sendMessage(env, chatId, 
+        `${CONFIG.EMOJI.bot} <b>AI 助手思考中...</b>\n\n请稍候，正在分析您的问题。`
+      );
+      
+      // 准备上下文
+      const context = {
+        system: CONFIG.SYSTEM.NAME,
+        version: CONFIG.SYSTEM.VERSION,
+        timestamp: Formatter.formatBeijingTime(),
+        userQuestion: prompt
+      };
+      
+      // 获取系统状态作为额外上下文
+      try {
+        const stats = await DB.getSystemStats(env);
+        if (stats) {
+          context.systemStats = stats;
+        }
+      } catch (e) {
+        // 忽略统计获取错误
+      }
+      
+      // 调用AI
+      const aiResponse = await ExternalService.callAI(env, prompt, context);
+      
+      // 构建响应消息
+      const responseMessage = 
+        `${CONFIG.EMOJI.bot} <b>AI 分析结果</b>\n\n` +
+        `${aiResponse}\n\n` +
+        `───────────────\n` +
+        `<i>${CONFIG.SYSTEM.NAME} AI助手 | ${Formatter.formatBeijingTime()}</i>`;
+      
+      // 发送响应
+      await ExternalService.sendMessage(env, chatId, responseMessage);
+      
+      // 删除等待消息
+      if (waitMsg && waitMsg.result && waitMsg.result.message_id) {
+        try {
+          await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/deleteMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              message_id: waitMsg.result.message_id
+            })
+          });
+        } catch (e) {
+          // 忽略删除错误
+        }
+      }
+      
+    } catch (error) {
+      Logger.error("AIChat", "AI聊天失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>AI 助手暂时无法响应</b>\n\n错误信息: <code>${error.message || '未知错误'}</code>\n\n请稍后重试。`
+      );
+    }
+  }
+
+  /**
+   * 处理帮助信息
+   */
+  static async handleHelp(env, chatId) {
+    try {
+      const helpMessage = MessageRenderer.renderHelp();
+      await ExternalService.sendMessage(env, chatId, helpMessage);
+    } catch (error) {
+      Logger.error("Help", "帮助信息发送失败", error);
+      await ExternalService.sendMessage(env, chatId, 
+        `❌ <b>获取帮助信息失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+}
+
+// ==============================================================================
+// 9. 事件处理器 (Event Handlers) - 完整版（已修复）
+// ==============================================================================
+
+/**
+ * 处理回调查询（按钮点击）
+ */
+async function handleCallback(env, query) {
+  const data = query.data;
+  const chatId = query.message.chat.id;
+  const messageId = query.message.message_id;
+  
+  Logger.info("Callback", `收到回调: ${data}, chatId: ${chatId}, messageId: ${messageId}`);
+  
+  // 立即响应回调，防止超时
+  try {
+    await ExternalService.answerCallbackQuery(env, query.id, "处理中...");
+  } catch (e) {
+    Logger.error("Callback", "回答回调失败", e);
+  }
+  
+  // 处理不同回调类型
+  try {
+    if (data === 'refresh_preview') {
+      // 刷新预览
+      await Controller.handlePreview(env, chatId, messageId);
+      
+    } else if (data === 'view_details') {
+      // 查看预测详情
+      const task = await DB.getTask(env);
+      if (task && task.finalPrediction) {
+        const details = MessageRenderer.renderPredictionDetails(task.finalPrediction);
+        await ExternalService.editMessage(env, chatId, messageId, details.text, details.keyboard);
+      } else {
+        await ExternalService.answerCallbackQuery(env, query.id, "暂无预测详情", true);
+      }
+      
+    } else if (data === 'back_to_preview') {
+      // 返回预测预览
+      await Controller.handlePreview(env, chatId, messageId);
+      
+    } else if (data.startsWith('history_page_')) {
+      // 历史记录翻页
+      const page = parseInt(data.replace('history_page_', ''));
+      await Controller.handleHistory(env, chatId, page, messageId);
+      
+    } else if (data === 'back_to_menu') {
+      // 返回菜单
+      await ExternalService.sendMessage(env, chatId, `📂 <b>${CONFIG.SYSTEM.NAME}</b> 主菜单`, KEYBOARDS.MAIN_MENU);
+      
+    } else {
+      // 未知回调
+      await ExternalService.answerCallbackQuery(env, query.id, "未知操作", true);
+    }
+  } catch (error) {
+    Logger.error("Callback", "处理回调失败", error);
+    await ExternalService.answerCallbackQuery(env, query.id, "处理失败，请重试", true);
+  }
+}
+
+/**
+ * 处理主更新循环
+ */
+async function handleUpdate(env, payload, ctx) {
+  // 1. 处理回调查询
+  if (payload.callback_query) {
+    await handleCallback(env, payload.callback_query);
+    return;
+  }
+
+  // 2. 验证消息有效性
+  const msg = payload.message || payload.channel_post;
+  if (!msg || !msg.text) return;
+
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  const userId = msg.from ? String(msg.from.id) : "CHANNEL";
+  
+  Logger.info("Update", `收到消息: ${text}, chatId: ${chatId}, userId: ${userId}`);
+  
+  // 3. 权限检查
+  const isAdmin = (String(msg.from?.id) === String(env.TG_ADMIN_ID));
+  
+  // 4. 状态机检查
+  const userState = userStateManager.getState(chatId);
+  
+  // 处理定时设置状态
+  if (userState && userState.state === "WAITING_SCHEDULE_TIME") {
+    userStateManager.deleteState(chatId);
+    await Controller.handleScheduleSettings(env, chatId, text);
+    return;
+  }
+  
+  // 5. 命令路由
+  
+  // --- 复盘回测指令 ---
+  if (text.startsWith("复盘")) {
+    const match = text.match(/复盘\s*(\d+)/);
+    if (match) {
+      ctx.waitUntil(Controller.handleBacktest(env, chatId, match[1]));
+    } else {
+      await ExternalService.sendMessage(env, chatId, 
+        "❌ <b>格式错误</b>\n\n" +
+        "请使用: <code>复盘 期号</code>\n" +
+        "例如: <code>复盘 2024130</code>\n\n" +
+        "功能说明: 系统会回到该期，模拟当时的预测环境，并与真实结果对比，自动学习优化。"
+      );
+    }
+    return;
+  }
+  
+  // --- 导航指令 ---
+  if (text === "/start" || text.includes("返回大厅")) {
+    await ExternalService.sendMessage(env, chatId, 
+      `🏠 <b>${CONFIG.SYSTEM.NAME}</b>\n\n` +
+      `系统版本: ${CONFIG.SYSTEM.VERSION}\n` +
+      `核心功能: 智能预测 + 时光机复盘 + 自主学习\n\n` +
+      `请选择功能开始使用。`,
+      KEYBOARDS.LOBBY
+    );
+    return;
+  }
+  
+  if (text.includes("AI 助手")) {
+    await ExternalService.sendMessage(env, chatId, 
+      `${CONFIG.EMOJI.bot} <b>AI 对话模式</b>\n\n` +
+      `请直接发送您的问题，我会从数据分析、概率学角度为您解答。\n\n` +
+      `<b>可以咨询:</b>\n` +
+      `• 预测算法原理\n` +
+      `• 数据统计规律\n` +
+      `• 系统使用方法\n` +
+      `• 其他相关问题`,
+      KEYBOARDS.AI_CHAT
+    );
+    return;
+  }
+  
+  if (text === CONFIG.SYSTEM.NAME || text.includes("返回菜单")) {
+    await ExternalService.sendMessage(env, chatId, 
+      `📂 <b>${CONFIG.SYSTEM.NAME} 主菜单</b>\n\n` +
+      `版本: ${CONFIG.SYSTEM.VERSION}\n` +
+      `选择功能开始使用。`,
+      KEYBOARDS.MAIN_MENU
+    );
+    return;
+  }
+  
+  if (text === BTNS.HELP) {
+    ctx.waitUntil(Controller.handleHelp(env, chatId));
+    return;
+  }
+  
+  if (text === BTNS.STATUS) {
+    ctx.waitUntil(Controller.handleSystemStatus(env, chatId));
+    return;
+  }
+  
+  // --- 普通用户功能 ---
+  if (text === BTNS.REC) {
+    await Controller.handleHistory(env, chatId, 1);
+    return;
+  }
+  
+  if (text === BTNS.PREVIEW) {
+    await Controller.handlePreview(env, chatId);
+    return;
+  }
+  
+  if (text === BTNS.SCORE) {
+    ctx.waitUntil(Controller.handleScoreboard(env, chatId));
+    return;
+  }
+  
+  // --- 管理员功能 ---
+  if (isAdmin) {
+    if (text === BTNS.MANAGE) {
+      await ExternalService.sendMessage(env, chatId, 
+        `${CONFIG.EMOJI.manage} <b>系统管理后台</b>\n\n` +
+        `版本: ${CONFIG.SYSTEM.VERSION}\n` +
+        `选择功能进行管理。`,
+        KEYBOARDS.ADMIN_MENU
+      );
+      return;
+    }
+    
+    if (text === BTNS.SYNC) {
+      ctx.waitUntil(Controller.handleSync(env, chatId));
+      return;
+    }
+    
+    if (text === BTNS.RESET) {
+      ctx.waitUntil(Controller.handleReset(env, chatId));
+      return;
+    }
+    
+    if (text === BTNS.PUSH) {
+      ctx.waitUntil(Controller.handleForcePush(env, chatId));
+      return;
+    }
+    
+    if (text === BTNS.AUTO) {
+      ctx.waitUntil(Controller.handleAutoPushToggle(env, chatId));
+      return;
+    }
+    
+    if (text === BTNS.TIME) {
+      await ExternalService.sendMessage(env, chatId, 
+        `${CONFIG.EMOJI.clock} <b>设置运算时长</b>\n\n` +
+        `选择预测计算时长（小时）\n` +
+        `当前设置影响任务解锁时间。`,
+        KEYBOARDS.TIME_SETTINGS
+      );
+      return;
+    }
+    
+    if (text.startsWith("SET_DUR_")) {
+      const match = text.match(/SET_DUR_(\d+)/);
+      if (match) {
+        const hours = parseInt(match[1]);
+        if (hours > 0 && hours <= 24) {
+          await Controller.handleTimeSetting(env, chatId, hours);
+        }
+      }
+      return;
+    }
+    
+    if (text === BTNS.SCHEDULE) {
+      await Controller.handleScheduleSettings(env, chatId);
+      return;
+    }
+    
+    if (text.includes("定时")) {
+      // 进入定时设置状态
+      userStateManager.setState(chatId, { 
+        state: "WAITING_SCHEDULE_TIME",
+        data: { action: "schedule" }
+      });
+      await Controller.handleScheduleSettings(env, chatId, text);
+      return;
+    }
+    
+    if (text === BTNS.LEARN) {
+      ctx.waitUntil(Controller.handleForceLearn(env, chatId));
+      return;
+    }
+  } else {
+    // 非管理员尝试使用管理员功能
+    const adminCommands = [BTNS.MANAGE, BTNS.SYNC, BTNS.RESET, BTNS.PUSH, BTNS.AUTO, 
+                          BTNS.TIME, BTNS.SCHEDULE, BTNS.LEARN];
+    if (adminCommands.includes(text) || text.startsWith("SET_DUR_")) {
+      await ExternalService.sendMessage(env, chatId, 
+        "🚫 <b>权限不足</b>\n\n此功能仅限管理员使用。"
+      );
+      return;
+    }
+  }
+  
+  // --- AI 聊天（如果不是命令） ---
+  if (env.AI && !text.startsWith("/")) {
+    ctx.waitUntil(Controller.handleAIChat(env, chatId, text));
+  }
+}
+
+/**
+ * 处理定时任务
+ */
+async function handleCronJob(env) {
+  Logger.info("Cron", "开始执行定时任务");
+  
+  try {
+    // 1. 处理预测任务进度
+    let task = await DB.getTask(env);
+    if (task && task.status === "CALCULATING") {
+      // 更新任务进度
+      const timePassed = Date.now() - task.startTime;
+      const totalDuration = task.unlockTime - task.startTime;
+      const progress = Math.min(1, timePassed / totalDuration);
+      
+      task.currentSims = Math.min(task.targetSims, Math.floor(progress * task.targetSims));
+      
+      // 检查是否完成
+      if (Date.now() >= task.unlockTime) {
+        task.status = "DONE";
+        task.currentSims = task.targetSims;
+        
+        // 生成最终预测
+        const allHistory = await DB.getHistory(env);
+        const analysis = MathEngine.analyzeBasicStats(allHistory);
+        const weights = await DB.getWeights(env);
+        const determinants = MathEngine.analyzeDeterminants(allHistory);
+        
+        task.finalPrediction = PredictionEngine.generate(task, analysis, weights, determinants);
+        
+        // 归档
+        await DB.archivePrediction(env, task.expect, task.finalPrediction);
+        
+        Logger.info("Cron", `任务完成: ${task.expect}, 置信度: ${task.finalPrediction.confidence}%`);
+      }
+      
+      await DB.saveTask(env, task);
+    }
+    
+    // 2. 处理定时推送
+    const autoPush = await DB.getSetting(env, "AUTO_PUSH", "ON");
+    const scheduleTime = await DB.getSetting(env, "SCHEDULE_TIME", "OFF");
+    
+    if (autoPush === "ON" && scheduleTime !== "OFF") {
+      // 获取当前北京时间
+      const now = Formatter.getBeijingTime();
+      const currentTimeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+      const todayStr = now.toISOString().split('T')[0];
+      
+      if (currentTimeStr === scheduleTime) {
+        const lastPushDate = await DB.getSetting(env, "LAST_SCHEDULE_PUSH", "");
+        
+        // 确保今天没推过，且任务已完成
+        if (lastPushDate !== todayStr && task && task.status === "DONE" && !task.isSent) {
+          Logger.info("Cron", `到达定时推送时间 ${scheduleTime}, 开始推送`);
+          
+          const weights = await DB.getWeights(env);
+          const msgData = MessageRenderer.renderPreview(task.finalPrediction, task, false, weights);
+          
+          if (env.TG_CHANNEL_ID) {
+            try {
+              await ExternalService.sendMessage(env, env.TG_CHANNEL_ID, msgData.text);
+              
+              // 更新状态
+              task.isSent = 1;
+              await DB.saveTask(env, task);
+              await DB.saveSetting(env, "LAST_SCHEDULE_PUSH", todayStr);
+              
+              // 更新推送统计
+              const totalPushes = parseInt(await DB.getSetting(env, "TOTAL_PUSHES", "0")) + 1;
+              await DB.saveSetting(env, "TOTAL_PUSHES", totalPushes.toString());
+              
+              Logger.info("Cron", `定时推送完成: ${task.expect} 到频道 ${env.TG_CHANNEL_ID}`);
+            } catch (error) {
+              Logger.error("Cron", "定时推送到频道失败", error);
+            }
+          }
+        }
+      }
+    }
+    
+    // 3. 自动归档战绩
+    const lastArchiveCheck = await DB.getSetting(env, "LAST_ARCHIVE_CHECK", "0");
+    const checkInterval = 24 * 60 * 60 * 1000; // 24小时检查一次
+    
+    if (Date.now() - parseInt(lastArchiveCheck) > checkInterval) {
+      Logger.info("Cron", "开始自动归档检查");
+      
+      try {
+        // 这里可以添加自动归档逻辑，比如检查未归档的预测等
+        await DB.saveSetting(env, "LAST_ARCHIVE_CHECK", Date.now().toString());
+      } catch (error) {
+        Logger.error("Cron", "自动归档检查失败", error);
+      }
+    }
+    
+    Logger.info("Cron", "定时任务执行完成");
+    
+  } catch (error) {
+    Logger.error("Cron", "定时任务执行失败", error);
+  }
+}
+
+/**
+ * 初始化数据库
+ */
+async function initDatabase(env) {
+  if (!env.DB) {
+    Logger.error("Init", "Database binding 'DB' not found");
+    return false;
+  }
+  
+  try {
+    // 创建表
+    const statements = [
+      // 历史开奖记录表
+      `CREATE TABLE IF NOT EXISTS lottery_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        expect TEXT UNIQUE, 
+        open_code TEXT, 
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+      
+      // 创建索引
+      `CREATE INDEX IF NOT EXISTS idx_history_expect ON lottery_history (expect DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_history_created ON lottery_history (created_at DESC)`,
+      
+      // 预测任务表
+      `CREATE TABLE IF NOT EXISTS lottery_tasks (
+        id INTEGER PRIMARY KEY DEFAULT 1, 
+        data TEXT, 
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+      
+      // 预测归档表
+      `CREATE TABLE IF NOT EXISTS prediction_archives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        expect TEXT UNIQUE, 
+        prediction_json TEXT, 
+        result_status TEXT DEFAULT 'PENDING', 
+        hit_detail TEXT, 
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+      
+      // 创建索引
+      `CREATE INDEX IF NOT EXISTS idx_archives_expect ON prediction_archives (expect DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_archives_status ON prediction_archives (result_status)`,
+      `CREATE INDEX IF NOT EXISTS idx_archives_created ON prediction_archives (created_at DESC)`,
+      
+      // 系统设置表
+      `CREATE TABLE IF NOT EXISTS lottery_settings (
+        setting_key TEXT PRIMARY KEY, 
+        value TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`
+    ];
+    
+    // 批量执行
+    const batch = statements.map(sql => env.DB.prepare(sql));
+    await env.DB.batch(batch);
+    
+    // 初始化默认设置
+    await DB.initDefaultSettings(env);
+    
+    Logger.info("Init", "数据库初始化完成");
+    return true;
+    
+  } catch (error) {
+    Logger.error("Init", "数据库初始化失败", error);
+    return false;
+  }
+}
+
+// ==============================================================================
+// 10. Worker 入口点 (Entry Point) - 完整版
+// ==============================================================================
+
+export default {
+  /**
+   * 定时触发入口
+   */
+  async scheduled(event, env, ctx) {
+    Logger.info("Worker", "定时任务触发");
+    
+    // 初始化数据库
+    const initialized = await initDatabase(env);
+    if (!initialized) {
+      Logger.error("Worker", "数据库初始化失败，定时任务中止");
+      return;
+    }
+    
+    // 执行定时任务
+    ctx.waitUntil(handleCronJob(env));
+  },
+
+  /**
+   * HTTP 请求入口
+   */
+  async fetch(request, env, ctx) {
+    // 记录请求信息
+    const url = new URL(request.url);
+    Logger.info("Worker", `收到请求: ${request.method} ${url.pathname}`);
+    
+    // 初始化数据库
+    const initialized = await initDatabase(env);
+    if (!initialized) {
+      return new Response("Database Initialization Failed. Please check D1 binding.", { 
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    }
+    
+    // 设置环境变量
+    CONFIG.SYSTEM.CHANNEL_ID = env.TG_CHANNEL_ID;
+    CONFIG.SYSTEM.ADMIN_ID = env.TG_ADMIN_ID;
+    
+    // GET 请求处理
+    if (request.method === "GET") {
+      // 手动同步接口
+      if (url.pathname === '/sync') {
+        if (!env.TG_ADMIN_ID) {
+          return new Response('未配置管理员ID', { status: 403 });
+        }
+        
+        try {
+          const result = await ExternalService.syncHistoryFromUrl(env);
+          
+          let html = `<h1>${CONFIG.SYSTEM.NAME} - 数据同步结果</h1>`;
+          html += `<style>body{font-family:Arial,sans-serif;margin:40px;line-height:1.6}</style>`;
+          
+          if (result.success) {
+            html += `<p style="color:green;font-weight:bold;">✅ 同步成功</p>`;
+            html += `<p>获取总数: ${result.total} 条</p>`;
+            html += `<p>成功新增: ${result.added} 条</p>`;
+            html += `<p>跳过重复: ${result.skipped || 0} 条</p>`;
+            
+            if (result.newCount > 0) {
+              html += `<p style="color:blue;">📢 发现 ${result.newCount} 条新开奖记录</p>`;
+            }
+            
+            const history = await DB.getHistory(env);
+            if (history.length > 0) {
+              await Controller.initTask(env, history);
+              html += `<p>🔄 预测任务已重新初始化</p>`;
+            }
+          } else {
+            html += `<p style="color:red;font-weight:bold;">❌ 同步失败</p>`;
+            html += `<p>错误: ${result.error || '未知错误'}</p>`;
+            
+            if (result.stack) {
+              html += `<details><summary>错误详情</summary><pre>${result.stack}</pre></details>`;
+            }
+          }
+          
+          html += `<hr><p><a href="/">返回首页</a> | <a href="/health">健康检查</a></p>`;
+          
+          return new Response(html, { 
+            status: result.success ? 200 : 500,
+            headers: { 'Content-Type': 'text/html; charset=utf-8' }
+          });
+        } catch (error) {
+          return new Response(`同步出错: ${error.message}`, { status: 500 });
+        }
+      }
+      
+      // 健康检查接口
+      if (url.pathname === '/health') {
+        try {
+          const stats = await DB.getSystemStats(env);
+          const settings = await DB.getAllSettings(env);
+          const task = await DB.getTask(env);
+          
+          const healthData = {
+            status: 'healthy',
+            service: CONFIG.SYSTEM.NAME,
+            version: CONFIG.SYSTEM.VERSION,
+            timestamp: Formatter.formatBeijingTime(),
+            database: {
+              initialized: true,
+              historyCount: stats?.historyCount || 0,
+              archiveCount: stats?.archiveCount || 0,
+              latestExpect: stats?.latestExpect || '无数据'
+            },
+            task: task ? {
+              expect: task.expect,
+              status: task.status,
+              progress: task.targetSims > 0 ? 
+                `${((task.currentSims / task.targetSims) * 100).toFixed(1)}%` : '0%',
+              unlockTime: new Date(task.unlockTime).toLocaleString('zh-CN')
+            } : null,
+            features: ['智能预测', '时光机复盘', '自主学习', '定时推送', 'AI助手'],
+            settings: {
+              autoPush: settings.AUTO_PUSH || 'ON',
+              scheduleTime: settings.SCHEDULE_TIME || 'OFF',
+              duration: `${parseInt(settings.DURATION || CONFIG.SYSTEM.DEFAULT_DURATION) / 3600000}小时`,
+              totalSyncs: settings.TOTAL_SYNCS || '0',
+              totalPushes: settings.TOTAL_PUSHES || '0'
+            }
+          };
+          
+          return new Response(JSON.stringify(healthData, null, 2), { 
+            status: 200,
+            headers: { 
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-cache'
+            }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ 
+            status: 'error',
+            error: error.message,
+            timestamp: new Date().toISOString()
+          }), { 
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+      
+      // Webhook设置接口
+      if (url.searchParams.get('setwebhook') === 'true' && env.TG_BOT_TOKEN) {
+        const webhookUrl = `${url.origin}`;
+        try {
+          const set = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
+          const result = await set.json();
+          return new Response(JSON.stringify(result, null, 2), { 
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } catch (e) {
+          return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+        }
+      }
+      
+      // 默认首页
+      return new Response(`
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>${CONFIG.SYSTEM.NAME}</title>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+              max-width: 800px;
+              margin: 0 auto;
+              padding: 20px;
+              line-height: 1.6;
+              color: #333;
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              min-height: 100vh;
+            }
+            .container {
+              background: white;
+              border-radius: 15px;
+              padding: 40px;
+              box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            }
+            h1 {
+              color: #2d3748;
+              border-bottom: 3px solid #667eea;
+              padding-bottom: 10px;
+              margin-top: 0;
+            }
+            h2 {
+              color: #4a5568;
+              margin-top: 30px;
+            }
+            .feature-grid {
+              display: grid;
+              grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+              gap: 20px;
+              margin: 30px 0;
+            }
+            .feature-card {
+              background: #f7fafc;
+              border-left: 4px solid #667eea;
+              padding: 20px;
+              border-radius: 8px;
+              transition: transform 0.2s;
+            }
+            .feature-card:hover {
+              transform: translateY(-5px);
+              box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            }
+            .feature-icon {
+              font-size: 24px;
+              margin-bottom: 10px;
+            }
+            .nav-links {
+              display: flex;
+              gap: 15px;
+              margin-top: 30px;
+              flex-wrap: wrap;
+            }
+            .btn {
+              display: inline-block;
+              padding: 12px 24px;
+              background: #667eea;
+              color: white;
+              text-decoration: none;
+              border-radius: 8px;
+              font-weight: bold;
+              transition: background 0.2s;
+            }
+            .btn:hover {
+              background: #5a67d8;
+            }
+            .btn-secondary {
+              background: #718096;
+            }
+            .btn-secondary:hover {
+              background: #4a5568;
+            }
+            .version {
+              color: #718096;
+              font-size: 14px;
+              margin-top: 30px;
+              padding-top: 20px;
+              border-top: 1px solid #e2e8f0;
+            }
+            .highlight {
+              color: #667eea;
+              font-weight: bold;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>${CONFIG.SYSTEM.NAME}</h1>
+            <p><strong>版本:</strong> ${CONFIG.SYSTEM.VERSION} - 企业完整版</p>
+            <p>这是一个专业的六合彩数据分析与预测系统，采用先进的算法和机器学习技术，提供准确的预测和分析服务。</p>
+            
+            <h2>🎯 核心特点</h2>
+            <div class="feature-grid">
+              <div class="feature-card">
+                <div class="feature-icon">🤖</div>
+                <h3>智能预测引擎</h3>
+                <p>基于马尔可夫链、遗漏值回归和动态权重算法，提供高准确率预测。</p>
+              </div>
+              <div class="feature-card">
+                <div class="feature-icon">⏰</div>
+                <h3>时光机复盘</h3>
+                <p>可以回到任意历史期数进行模拟预测，验证算法准确性。</p>
+              </div>
+              <div class="feature-card">
+                <div class="feature-icon">🧠</div>
+                <h3>自主学习</h3>
+                <p>预测失败自动分析原因，动态调整算法参数，持续优化准确率。</p>
+              </div>
+              <div class="feature-card">
+                <div class="feature-icon">📡</div>
+                <h3>定时推送</h3>
+                <p>支持定时自动推送预测结果，完整的推送管理系统。</p>
+              </div>
+            </div>
+            
+            <h2>🚀 主要功能</h2>
+            <ul>
+              <li><span class="highlight">智能预测分析</span> - 基于历史数据的多维度分析</li>
+              <li><span class="highlight">历史数据同步</span> - 从URL自动同步开奖记录</li>
+              <li><span class="highlight">战绩统计系统</span> - 详细记录预测准确率</li>
+              <li><span class="highlight">AI助手集成</span> - 智能问答和数据解释</li>
+              <li><span class="highlight">完整管理后台</span> - 管理员专用功能界面</li>
+              <li><span class="highlight">实时进度跟踪</span> - 预测生成进度可视化</li>
+            </ul>
+            
+            <div class="nav-links">
+              <a href="/health" class="btn">🏥 健康检查</a>
+              <a href="/sync" class="btn">🔄 手动同步数据</a>
+              <a href="https://core.telegram.org/bots" target="_blank" class="btn-secondary">📚 Telegram Bot API</a>
+            </div>
+            
+            <div class="version">
+              <p><strong>技术栈:</strong> Cloudflare Workers + D1 Database + AI + Telegram Bot API</p>
+              <p><strong>算法版本:</strong> V5.0 企业版 (马尔可夫链 + 遗漏值回归 + 动态权重调整)</p>
+              <p><strong>数据安全:</strong> 所有数据加密存储，无个人信息收集</p>
+              <p><strong>最后更新:</strong> ${new Date().toLocaleDateString('zh-CN')}</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `, { 
+        status: 200,
+        headers: { 
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache'
+        }
+      });
+    }
+
+    // POST请求处理（Telegram Webhook）
+    if (request.method === "POST") {
+      try {
+        const payload = await request.json();
+        
+        // 异步处理，立即返回200响应给Telegram
+        ctx.waitUntil(handleUpdate(env, payload, ctx));
+        
+        return new Response("OK", { 
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      } catch (e) {
+        Logger.error("Webhook", "处理POST请求出错", e);
+        return new Response("OK", { status: 200 }); // 始终返回OK给Telegram
+      }
+    }
+    
+    return new Response("Method not allowed", { status: 405 });
+  }
+};
