@@ -1,7 +1,11 @@
 /**
  * 澳门六合彩预测机器人 (Macau Mark Six Prediction Bot)
- * 版本: V5.0 Enterprise Complete Edition (修复版)
- * 修复: 频道消息不触发AI助手，避免无限循环
+ * 版本: V5.1 Enterprise Complete Edition (稳定修复版)
+ * 修复: 
+ * 1. 频道消息不触发AI助手，避免无限循环
+ * 2. 战绩统计显示问题
+ * 3. 数据库初始化和环境验证
+ * 4. 错误处理和日志优化
  * 
  * ==============================================================================
  * 核心功能清单:
@@ -37,7 +41,7 @@ const CONFIG = {
   // 系统基础设置
   SYSTEM: {
     NAME: "🇲🇴 新澳六合彩·天机",
-    VERSION: "V5.0 Enterprise Complete (修复版)",
+    VERSION: "V5.1 Enterprise Complete (稳定修复版)",
     DEFAULT_DURATION: 3 * 60 * 60 * 1000, // 默认计算时长
     TARGET_SIMS: 5000000,                 // 目标模拟次数
     BATCH_SIZE: 50000,                    // 每次执行批次
@@ -55,7 +59,8 @@ const CONFIG = {
     w_relation: 1.5,  // 生肖关系权重
     w_color: 1.0,     // 波色权重
     w_tail: 1.0,      // 尾数权重
-    w_shape: 0.8      // 形态权重
+    w_shape: 0.8,     // 形态权重
+    _version: "1.0"   // 权重版本
   },
 
   // 生肖映射表
@@ -126,7 +131,8 @@ const CONFIG = {
     help: "❓",
     learn: "🧠",
     calendar: "📅",
-    bell: "🔔"
+    bell: "🔔",
+    update: "📈"
   }
 };
 
@@ -145,7 +151,8 @@ const BTNS = {
   LEARN: `${CONFIG.EMOJI.learn} 强制学习`,
   HELP: `${CONFIG.EMOJI.help} 使用帮助`,
   SCHEDULE: `${CONFIG.EMOJI.calendar} 定时设置`,
-  STATUS: `${CONFIG.EMOJI.bell} 系统状态`
+  STATUS: `${CONFIG.EMOJI.bell} 系统状态`,
+  UPDATE_SCORES: `${CONFIG.EMOJI.update} 更新战绩`
 };
 
 // 键盘布局定义（完整版）
@@ -176,7 +183,7 @@ const KEYBOARDS = {
       [{ text: BTNS.AUTO }, { text: BTNS.TIME }],
       [{ text: BTNS.SYNC }, { text: BTNS.SCHEDULE }],
       [{ text: BTNS.LEARN }, { text: BTNS.STATUS }],
-      [{ text: BTNS.BACK }]
+      [{ text: BTNS.UPDATE_SCORES }, { text: BTNS.BACK }]
     ],
     resize_keyboard: true
   },
@@ -214,14 +221,16 @@ const KEYBOARDS = {
  * 日志记录器
  */
 class Logger {
-  static info(context, message) {
+  static info(context, message, extra = {}) {
     const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
-    console.log(`[${timestamp}] [INFO] [${context}] ${message}`);
+    const extraStr = Object.keys(extra).length > 0 ? ` | ${JSON.stringify(extra)}` : '';
+    console.log(`[${timestamp}] [INFO] [${context}] ${message}${extraStr}`);
   }
 
   static error(context, message, error = null) {
     const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
-    console.error(`[${timestamp}] [ERROR] [${context}] ${message}`, error ? error : '');
+    const errorStr = error ? ` | ${error.message} | ${error.stack?.substring(0, 200)}` : '';
+    console.error(`[${timestamp}] [ERROR] [${context}] ${message}${errorStr}`);
   }
 
   static warn(context, message) {
@@ -229,9 +238,15 @@ class Logger {
     console.warn(`[${timestamp}] [WARN] [${context}] ${message}`);
   }
 
-  static debug(context, message) {
+  static debug(context, message, data = null) {
     const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
-    console.debug(`[${timestamp}] [DEBUG] [${context}] ${message}`);
+    const dataStr = data ? ` | ${JSON.stringify(data).substring(0, 200)}` : '';
+    console.debug(`[${timestamp}] [DEBUG] [${context}] ${message}${dataStr}`);
+  }
+
+  static request(context, method, url, status, responseTime) {
+    const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
+    console.log(`[${timestamp}] [REQUEST] [${context}] ${method} ${url} - ${status} - ${responseTime}ms`);
   }
 }
 
@@ -301,6 +316,14 @@ class Formatter {
     const empty = length - filled;
     return "█".repeat(filled) + "░".repeat(empty);
   }
+
+  /**
+   * 格式化数字，确保是整数
+   */
+  static safeInt(value, defaultValue = 0) {
+    const num = parseInt(value);
+    return isNaN(num) ? defaultValue : num;
+  }
 }
 
 /**
@@ -309,18 +332,21 @@ class Formatter {
 class UserStateManager {
   constructor() {
     this.states = new Map();
+    this.lastCleanup = Date.now();
   }
 
   setState(userId, state) {
+    this.cleanupIfNeeded();
     this.states.set(userId, {
       ...state,
       timestamp: Date.now(),
       lastActivity: Date.now()
     });
-    this.cleanup();
+    return this;
   }
 
   getState(userId) {
+    this.cleanupIfNeeded();
     const state = this.states.get(userId);
     if (state && Date.now() - state.timestamp < 30 * 60 * 1000) { // 30分钟有效期
       state.lastActivity = Date.now();
@@ -347,6 +373,14 @@ class UserStateManager {
     this.states.delete(userId);
   }
 
+  cleanupIfNeeded() {
+    const now = Date.now();
+    if (now - this.lastCleanup > 5 * 60 * 1000) { // 每5分钟清理一次
+      this.cleanup();
+      this.lastCleanup = now;
+    }
+  }
+
   cleanup() {
     const now = Date.now();
     for (const [userId, state] of this.states.entries()) {
@@ -360,14 +394,90 @@ class UserStateManager {
 const userStateManager = new UserStateManager();
 
 // ==============================================================================
-// 3. 数据库操作层 (Database Access Layer) - 完整版
+// 3. 数据库操作层 (Database Access Layer) - 完整修复版
 // ==============================================================================
 
 const DB = {
   /**
+   * 初始化数据库
+   */
+  init: async function(env) {
+    try {
+      Logger.info("DB", "开始初始化数据库");
+      
+      // 检查DB绑定
+      if (!env.DB) {
+        throw new Error("Database binding 'DB' not found");
+      }
+      
+      // 创建表
+      const statements = [
+        // 历史开奖记录表
+        `CREATE TABLE IF NOT EXISTS lottery_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, 
+          expect TEXT UNIQUE, 
+          open_code TEXT, 
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        
+        // 创建索引
+        `CREATE INDEX IF NOT EXISTS idx_history_expect ON lottery_history (expect DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_history_created ON lottery_history (created_at DESC)`,
+        
+        // 预测任务表
+        `CREATE TABLE IF NOT EXISTS lottery_tasks (
+          id INTEGER PRIMARY KEY DEFAULT 1, 
+          data TEXT, 
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        
+        // 预测归档表
+        `CREATE TABLE IF NOT EXISTS prediction_archives (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, 
+          expect TEXT UNIQUE, 
+          prediction_json TEXT, 
+          result_status TEXT DEFAULT 'PENDING', 
+          hit_detail TEXT, 
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        
+        // 创建索引
+        `CREATE INDEX IF NOT EXISTS idx_archives_expect ON prediction_archives (expect DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_archives_status ON prediction_archives (result_status)`,
+        `CREATE INDEX IF NOT EXISTS idx_archives_created ON prediction_archives (created_at DESC)`,
+        
+        // 系统设置表
+        `CREATE TABLE IF NOT EXISTS lottery_settings (
+          setting_key TEXT PRIMARY KEY, 
+          value TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`
+      ];
+      
+      // 批量执行
+      const batch = statements.map(sql => env.DB.prepare(sql));
+      await env.DB.batch(batch);
+      
+      // 初始化默认设置
+      await this.initDefaultSettings(env);
+      
+      Logger.info("DB", "数据库初始化完成");
+      return true;
+      
+    } catch (e) {
+      Logger.error("DB", "数据库初始化失败", e);
+      return false;
+    }
+  },
+
+  /**
    * 获取历史记录
    */
-  getHistory: async (env, limit = null, offset = 0) => {
+  getHistory: async function(env, limit = null, offset = 0) {
     try {
       let sql = "SELECT * FROM lottery_history ORDER BY expect DESC";
       let params = [];
@@ -386,7 +496,7 @@ const DB = {
   /**
    * 获取记录总数
    */
-  getHistoryCount: async (env) => {
+  getHistoryCount: async function(env) {
     try {
       const result = await env.DB.prepare("SELECT COUNT(*) as count FROM lottery_history").first();
       return result ? result.count : 0;
@@ -399,11 +509,11 @@ const DB = {
   /**
    * 获取指定期号的历史记录
    */
-  getHistoryByExpect: async (env, expect) => {
+  getHistoryByExpect: async function(env, expect) {
     try {
       const result = await env.DB.prepare(
-        "SELECT * FROM lottery_history WHERE expect = ? ORDER BY expect DESC"
-      ).bind(expect).first();
+        "SELECT * FROM lottery_history WHERE expect = ?"
+      ).bind(expect.toString()).first();
       return result || null;
     } catch (e) {
       Logger.error("DB", `getHistoryByExpect failed for ${expect}`, e);
@@ -414,7 +524,7 @@ const DB = {
   /**
    * 获取最近的N期历史记录
    */
-  getRecentHistory: async (env, count = 100) => {
+  getRecentHistory: async function(env, count = 100) {
     try {
       const { results } = await env.DB.prepare(
         "SELECT * FROM lottery_history ORDER BY expect DESC LIMIT ?"
@@ -429,7 +539,7 @@ const DB = {
   /**
    * 添加单条历史记录
    */
-  addHistory: async (env, exp, code) => {
+  addHistory: async function(env, exp, code) {
     try {
       return await env.DB.prepare(
         "INSERT OR IGNORE INTO lottery_history (expect, open_code) VALUES (?, ?)"
@@ -443,7 +553,7 @@ const DB = {
   /**
    * 批量添加历史记录
    */
-  batchAddHistory: async (env, records) => {
+  batchAddHistory: async function(env, records) {
     try {
       if (!records || records.length === 0) return { success: true, added: 0, skipped: 0 };
       
@@ -507,7 +617,7 @@ const DB = {
   /**
    * 获取最新期号
    */
-  getLatestExpect: async (env) => {
+  getLatestExpect: async function(env) {
     try {
       const result = await env.DB.prepare(
         "SELECT expect FROM lottery_history ORDER BY expect DESC LIMIT 1"
@@ -522,7 +632,7 @@ const DB = {
   /**
    * 获取最早期号
    */
-  getEarliestExpect: async (env) => {
+  getEarliestExpect: async function(env) {
     try {
       const result = await env.DB.prepare(
         "SELECT expect FROM lottery_history ORDER BY expect ASC LIMIT 1"
@@ -537,7 +647,7 @@ const DB = {
   /**
    * 获取当前任务
    */
-  getTask: async (env) => {
+  getTask: async function(env) {
     try {
       const r = await env.DB.prepare("SELECT data FROM lottery_tasks WHERE id = 1").first();
       return r ? JSON.parse(r.data) : null;
@@ -550,7 +660,7 @@ const DB = {
   /**
    * 保存任务
    */
-  saveTask: async (env, data) => {
+  saveTask: async function(env, data) {
     try {
       return await env.DB.prepare(
         "INSERT OR REPLACE INTO lottery_tasks (id, data) VALUES (1, ?)"
@@ -564,7 +674,7 @@ const DB = {
   /**
    * 删除任务
    */
-  deleteTask: async (env) => {
+  deleteTask: async function(env) {
     try {
       return await env.DB.prepare("DELETE FROM lottery_tasks WHERE id = 1").run();
     } catch (e) {
@@ -576,7 +686,7 @@ const DB = {
   /**
    * 归档预测结果
    */
-  archivePrediction: async (env, expect, predData) => {
+  archivePrediction: async function(env, expect, predData) {
     try {
       return await env.DB.prepare(
         "INSERT OR IGNORE INTO prediction_archives (expect, prediction_json) VALUES (?, ?)"
@@ -590,7 +700,7 @@ const DB = {
   /**
    * 获取归档记录
    */
-  getArchives: async (env, limit = 10, offset = 0) => {
+  getArchives: async function(env, limit = 10, offset = 0) {
     try {
       const { results } = await env.DB.prepare(
         "SELECT * FROM prediction_archives WHERE result_status != 'PENDING' ORDER BY expect DESC LIMIT ? OFFSET ?"
@@ -603,13 +713,13 @@ const DB = {
   },
 
   /**
-   * 获取所有归档记录
+   * 获取所有归档记录（有限制）
    */
-  getAllArchives: async (env) => {
+  getAllArchives: async function(env, limit = 1000) {
     try {
       const { results } = await env.DB.prepare(
-        "SELECT * FROM prediction_archives ORDER BY expect DESC"
-      ).all();
+        "SELECT * FROM prediction_archives ORDER BY expect DESC LIMIT ?"
+      ).bind(limit).all();
       return results || [];
     } catch (e) {
       Logger.error("DB", "getAllArchives failed", e);
@@ -618,9 +728,24 @@ const DB = {
   },
 
   /**
+   * 获取待更新的归档记录
+   */
+  getPendingArchives: async function(env) {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM prediction_archives WHERE result_status = 'PENDING' ORDER BY expect DESC"
+      ).all();
+      return results || [];
+    } catch (e) {
+      Logger.error("DB", "getPendingArchives failed", e);
+      return [];
+    }
+  },
+
+  /**
    * 获取归档记录总数
    */
-  getArchiveCount: async (env) => {
+  getArchiveCount: async function(env) {
     try {
       const result = await env.DB.prepare(
         "SELECT COUNT(*) as count FROM prediction_archives"
@@ -635,7 +760,7 @@ const DB = {
   /**
    * 更新归档状态
    */
-  updateArchiveStatus: async (env, expect, status, detail) => {
+  updateArchiveStatus: async function(env, expect, status, detail) {
     try {
       return await env.DB.prepare(
         "UPDATE prediction_archives SET result_status = ?, hit_detail = ?, updated_at = CURRENT_TIMESTAMP WHERE expect = ?"
@@ -649,7 +774,7 @@ const DB = {
   /**
    * 获取指定期号的归档记录
    */
-  getArchiveByExpect: async (env, expect) => {
+  getArchiveByExpect: async function(env, expect) {
     try {
       const result = await env.DB.prepare(
         "SELECT * FROM prediction_archives WHERE expect = ?"
@@ -664,7 +789,7 @@ const DB = {
   /**
    * 获取设置
    */
-  getSetting: async (env, key, def = "") => {
+  getSetting: async function(env, key, def = "") {
     try {
       const r = await env.DB.prepare(
         "SELECT value FROM lottery_settings WHERE setting_key = ?"
@@ -679,7 +804,7 @@ const DB = {
   /**
    * 保存设置
    */
-  saveSetting: async (env, key, val) => {
+  saveSetting: async function(env, key, val) {
     try {
       return await env.DB.prepare(
         "INSERT OR REPLACE INTO lottery_settings (setting_key, value) VALUES (?, ?)"
@@ -693,7 +818,7 @@ const DB = {
   /**
    * 获取所有设置
    */
-  getAllSettings: async (env) => {
+  getAllSettings: async function(env) {
     try {
       const { results } = await env.DB.prepare(
         "SELECT setting_key, value FROM lottery_settings"
@@ -712,13 +837,14 @@ const DB = {
   /**
    * 获取算法权重
    */
-  getWeights: async (env) => {
+  getWeights: async function(env) {
     try {
-      const w = await DB.getSetting(env, "ALGO_WEIGHTS", null);
+      const w = await this.getSetting(env, "ALGO_WEIGHTS", null);
       if (w) {
         const weights = JSON.parse(w);
         // 确保所有权重字段都存在
-        return { ...CONFIG.DEFAULT_ALGO_WEIGHTS, ...weights };
+        const defaultWeights = { ...CONFIG.DEFAULT_ALGO_WEIGHTS };
+        return { ...defaultWeights, ...weights };
       }
       return { ...CONFIG.DEFAULT_ALGO_WEIGHTS };
     } catch (e) {
@@ -730,17 +856,22 @@ const DB = {
   /**
    * 保存算法权重
    */
-  saveWeights: async (env, weights) => {
+  saveWeights: async function(env, weights) {
     try {
       // 限制权重范围
       const sanitizedWeights = {};
       Object.keys(weights).forEach(key => {
+        if (key.startsWith('_')) {
+          sanitizedWeights[key] = weights[key];
+          return;
+        }
+        
         let value = weights[key];
         value = Math.max(0.1, Math.min(5.0, value)); // 限制在0.1-5.0之间
         sanitizedWeights[key] = parseFloat(value.toFixed(2));
       });
       
-      return await DB.saveSetting(env, "ALGO_WEIGHTS", JSON.stringify(sanitizedWeights));
+      return await this.saveSetting(env, "ALGO_WEIGHTS", JSON.stringify(sanitizedWeights));
     } catch (e) {
       Logger.error("DB", "saveWeights failed", e);
       return null;
@@ -750,9 +881,9 @@ const DB = {
   /**
    * 重置算法权重为默认值
    */
-  resetWeights: async (env) => {
+  resetWeights: async function(env) {
     try {
-      return await DB.saveWeights(env, CONFIG.DEFAULT_ALGO_WEIGHTS);
+      return await this.saveWeights(env, CONFIG.DEFAULT_ALGO_WEIGHTS);
     } catch (e) {
       Logger.error("DB", "resetWeights failed", e);
       return null;
@@ -762,7 +893,7 @@ const DB = {
   /**
    * 清空所有数据
    */
-  clearAllHistory: async (env) => {
+  clearAllHistory: async function(env) {
     try {
       const batch = [
         env.DB.prepare("DELETE FROM lottery_history"),
@@ -781,7 +912,7 @@ const DB = {
   /**
    * 获取系统统计信息
    */
-  getSystemStats: async (env) => {
+  getSystemStats: async function(env) {
     try {
       const [
         historyCount,
@@ -790,11 +921,11 @@ const DB = {
         earliestExpect,
         taskData
       ] = await Promise.all([
-        DB.getHistoryCount(env),
-        DB.getArchiveCount(env),
-        DB.getLatestExpect(env),
-        DB.getEarliestExpect(env),
-        DB.getTask(env)
+        this.getHistoryCount(env),
+        this.getArchiveCount(env),
+        this.getLatestExpect(env),
+        this.getEarliestExpect(env),
+        this.getTask(env)
       ]);
 
       return {
@@ -814,7 +945,7 @@ const DB = {
   /**
    * 初始化默认设置
    */
-  initDefaultSettings: async (env) => {
+  initDefaultSettings: async function(env) {
     try {
       const defaultSettings = {
         "DURATION": CONFIG.SYSTEM.DEFAULT_DURATION.toString(),
@@ -825,7 +956,8 @@ const DB = {
         "SYSTEM_VERSION": CONFIG.SYSTEM.VERSION,
         "LAST_SYNC": "",
         "TOTAL_SYNCS": "0",
-        "TOTAL_PUSHES": "0"
+        "TOTAL_PUSHES": "0",
+        "LAST_ARCHIVE_CHECK": "0"
       };
 
       const batch = Object.entries(defaultSettings).map(([key, value]) =>
@@ -1521,7 +1653,7 @@ class PredictionEngine {
       totalHistoryRecords: history.length,
       usedWeights: W,
       generatedAt: new Date().toISOString(),
-      algorithmVersion: "V5.0"
+      algorithmVersion: "V5.1"
     };
   }
 
@@ -1581,7 +1713,7 @@ class PredictionEngine {
       totalHistoryRecords: 0,
       usedWeights: CONFIG.DEFAULT_ALGO_WEIGHTS,
       generatedAt: new Date().toISOString(),
-      algorithmVersion: "V5.0-Static"
+      algorithmVersion: "V5.1-Static"
     };
   }
 
@@ -1667,7 +1799,7 @@ class PredictionEngine {
 }
 
 // ==============================================================================
-// 6. 消息渲染器 (UI Renderer) - 完整版
+// 6. 消息渲染器 (UI Renderer) - 完整修复版
 // ==============================================================================
 
 class MessageRenderer {
@@ -1809,7 +1941,7 @@ ${colorDetails}
 ${tailDetails}
 ────────────────
 <b>📈 算法权重参数:</b>
-${Object.entries(prediction.usedWeights || {}).map(([key, value]) => 
+${Object.entries(prediction.usedWeights || {}).filter(([key]) => !key.startsWith('_')).map(([key, value]) => 
   `${key}: ${value.toFixed(2)}`
 ).join(" | ")}
 
@@ -1829,26 +1961,26 @@ ${Object.entries(prediction.usedWeights || {}).map(([key, value]) =>
     };
   }
 
-  /**
-   * 渲染复盘报告
-   */
-  static renderBacktestReport(inputExpect, targetExpect, prediction, actualResult, evaluation, learnMsg = "") {
-    const actualSpecial = parseInt(actualResult.open_code.split(",")[6]);
-    const actAttr = Formatter.getAttributes(actualSpecial);
-    
-    const isZodiacWin = prediction.zodiac.main.includes(actAttr.zodiac);
-    const isZodiacGuardWin = prediction.zodiac.guard.includes(actAttr.zodiac);
-    const isColorWin = prediction.color.main === actAttr.color || prediction.color.guard === actAttr.color;
-    const isTailWin = prediction.tail.includes(actualSpecial % 10);
-    const isHeadWin = parseInt(prediction.head.main) === Math.floor(actualSpecial / 10);
-    const isShapeWin = prediction.shape === ((actualSpecial >= 25 ? "大" : "小") + (actualSpecial % 2 !== 0 ? "单" : "双"));
-    
-    const zodiacResult = isZodiacWin ? CONFIG.EMOJI.win + " 主中!" : 
-                        (isZodiacGuardWin ? "🆗 防中" : CONFIG.EMOJI.loss + " 未中");
-    const colorResult = isColorWin ? CONFIG.EMOJI.win + " 命中" : CONFIG.EMOJI.loss + " 未中";
-    const tailResult = isTailWin ? CONFIG.EMOJI.win + " 命中" : CONFIG.EMOJI.loss + " 未中";
-    
-    return `
+/**
+ * 渲染复盘报告
+ */
+static renderBacktestReport(inputExpect, targetExpect, prediction, actualResult, evaluation, learnMsg = "") {
+  const actualSpecial = parseInt(actualResult.open_code.split(",")[6]);
+  const actAttr = Formatter.getAttributes(actualSpecial);
+  
+  const isZodiacWin = prediction.zodiac.main.includes(actAttr.zodiac);
+  const isZodiacGuardWin = prediction.zodiac.guard.includes(actAttr.zodiac); // 注意：这里原本是 "gard" 应该是 "guard"
+  const isColorWin = prediction.color.main === actAttr.color || prediction.color.guard === actAttr.color;
+  const isTailWin = prediction.tail.includes(actualSpecial % 10);
+  const isHeadWin = parseInt(prediction.head.main) === Math.floor(actualSpecial / 10);
+  const isShapeWin = prediction.shape === ((actualSpecial >= 25 ? "大" : "小") + (actualSpecial % 2 !== 0 ? "单" : "双"));
+  
+  const zodiacResult = isZodiacWin ? CONFIG.EMOJI.win + " 主中!" : 
+                      (isZodiacGuardWin ? "🆗 防中" : CONFIG.EMOJI.loss + " 未中");
+  const colorResult = isColorWin ? CONFIG.EMOJI.win + " 命中" : CONFIG.EMOJI.loss + " 未中";
+  const tailResult = isTailWin ? CONFIG.EMOJI.win + " 命中" : CONFIG.EMOJI.loss + " 未中";
+  
+  return `
 <b>📉 时光机复盘报告</b>
 基准期号: ${inputExpect}
 预测目标: <b>${targetExpect}</b>
@@ -1878,15 +2010,45 @@ ${Object.entries(prediction.usedWeights || {}).map(([key, value]) =>
 ────────────────
 ${learnMsg}
 <b>⏰ 复盘时间</b>: ${Formatter.formatBeijingTime()}
-    `.trim();
-  }
+  `.trim();
+}
 
   /**
    * 渲染战绩统计
    */
-  static renderScoreboard(archives, stats) {
+  static renderScoreboard(archives, stats, historyCount = 0, archiveCount = 0) {
     if (!archives || archives.length === 0) {
-      return `<b>${CONFIG.EMOJI.score} 预测战绩</b>\n\n暂无已开奖的战绩记录。`;
+      let message = `<b>${CONFIG.EMOJI.score} 预测战绩</b>\n\n`;
+      
+      if (historyCount === 0) {
+        message += `❌ <b>暂无数据</b>\n\n`;
+        message += `数据库中没有历史开奖记录。\n\n`;
+        message += `<b>解决方法:</b>\n`;
+        message += `1. 点击"${BTNS.SYNC}"同步历史数据\n`;
+        message += `2. 等待数据同步完成\n`;
+        message += `3. 重新查看战绩\n`;
+      } else if (archiveCount === 0) {
+        message += `📭 <b>暂无战绩记录</b>\n\n`;
+        message += `有 ${historyCount} 期历史记录，但没有预测归档。\n\n`;
+        message += `<b>获取战绩的步骤:</b>\n`;
+        message += `1. 点击"${BTNS.PREVIEW}"生成预测\n`;
+        message += `2. 等待预测完成\n`;
+        message += `3. 点击"${BTNS.PUSH}"推送预测\n`;
+        message += `4. 等待开奖后自动记录\n`;
+        message += `5. 或使用"${BTNS.UPDATE_SCORES}"手动更新\n`;
+      } else {
+        message += `⏳ <b>战绩正在计算中</b>\n\n`;
+        message += `有 ${archiveCount} 条预测记录等待更新状态。\n`;
+        message += `请管理员点击"${BTNS.UPDATE_SCORES}"按钮。`;
+      }
+      
+      message += `\n────────────────\n`;
+      message += `<b>系统状态</b>\n`;
+      message += `历史记录: ${historyCount} 期\n`;
+      message += `预测归档: ${archiveCount} 条\n`;
+      message += `系统时间: ${Formatter.formatBeijingTime()}`;
+      
+      return message;
     }
     
     let message = `<b>${CONFIG.EMOJI.score} 近期预测战绩</b>\n\n`;
@@ -1906,7 +2068,7 @@ ${learnMsg}
       message += `<b>📊 统计概览</b>\n`;
       message += `总场次: ${stats.totalMatches}\n`;
       message += `胜利场次: ${stats.wins} (${stats.winRate}%)\n`;
-      message += `平均得分: ${stats.avgScore.toFixed(1)}\n`;
+      message += `平均得分: ${stats.avgScore}\n`;
       message += `最高得分: ${stats.maxScore}\n`;
       message += `最近连胜: ${stats.currentStreak}\n`;
       message += `最长连胜: ${stats.maxStreak}\n`;
@@ -2019,6 +2181,7 @@ ${learnMsg}
 "${BTNS.TIME}": 设置运算时长
 "${BTNS.LEARN}": 强制学习最新数据
 "${BTNS.STATUS}": 查看系统状态
+"${BTNS.UPDATE_SCORES}": 手动更新战绩
 
 <u>AI助手</u>
 点击"AI助手"按钮进入聊天模式
@@ -2065,7 +2228,7 @@ ${learnMsg}
 }
 
 // ==============================================================================
-// 7. 外部接口封装 (External Integrations) - 完整版
+// 7. 外部接口封装 (External Integrations) - 完整修复版
 // ==============================================================================
 
 class ExternalService {
@@ -2073,6 +2236,8 @@ class ExternalService {
    * 发送 Telegram 消息
    */
   static async sendMessage(env, chatId, text, keyboard = null, parseMode = "HTML") {
+    const startTime = Date.now();
+    
     const body = {
       chat_id: chatId,
       text: text,
@@ -2090,13 +2255,16 @@ class ExternalService {
         body: JSON.stringify(body)
       });
       
+      const responseTime = Date.now() - startTime;
       const result = await response.json();
       
       if (!response.ok) {
         Logger.error("Telegram", `sendMessage failed: ${result.description}`, result);
+        Logger.request("Telegram", "POST", "sendMessage", response.status, responseTime);
         return null;
       }
       
+      Logger.debug("Telegram", `sendMessage success to ${chatId}`, { responseTime });
       return result;
     } catch (error) {
       Logger.error("Telegram", "sendMessage network error", error);
@@ -2108,6 +2276,8 @@ class ExternalService {
    * 编辑 Telegram 消息
    */
   static async editMessage(env, chatId, messageId, text, keyboard = null) {
+    const startTime = Date.now();
+    
     const body = {
       chat_id: chatId,
       message_id: messageId,
@@ -2125,10 +2295,12 @@ class ExternalService {
         body: JSON.stringify(body)
       });
       
+      const responseTime = Date.now() - startTime;
       const result = await response.json();
       
       if (!response.ok) {
         Logger.error("Telegram", `editMessage failed: ${result.description}`, result);
+        Logger.request("Telegram", "POST", "editMessageText", response.status, responseTime);
         return null;
       }
       
@@ -2169,19 +2341,24 @@ class ExternalService {
       return { success: false, error: '未配置 LOTTERY_DATA_URL 环境变量' };
     }
 
+    const startTime = Date.now();
+    
     try {
       Logger.info("Sync", `开始从 ${env.LOTTERY_DATA_URL} 同步数据`);
       
       const response = await fetch(env.LOTTERY_DATA_URL, {
         headers: { 
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) MarkSixBot/5.0',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) MarkSixBot/5.1',
           'Accept': 'application/json',
           'Cache-Control': 'no-cache'
         },
         timeout: 30000
       });
 
+      const responseTime = Date.now() - startTime;
+      
       if (!response.ok) {
+        Logger.request("Sync", "GET", env.LOTTERY_DATA_URL, response.status, responseTime);
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
@@ -2250,6 +2427,9 @@ class ExternalService {
         await DB.saveSetting(env, "LAST_SYNC", Formatter.formatBeijingTime());
       }
 
+      const totalTime = Date.now() - startTime;
+      Logger.request("Sync", "GET", env.LOTTERY_DATA_URL, 200, totalTime);
+      
       return {
         success: saveResult.success,
         total: records.length,
@@ -2387,7 +2567,7 @@ class ExternalService {
 }
 
 // ==============================================================================
-// 8. 业务逻辑控制器 (Business Logic Controllers) - 完整版
+// 8. 业务逻辑控制器 (Business Logic Controllers) - 完整修复版
 // ==============================================================================
 
 class Controller {
@@ -2414,7 +2594,7 @@ class Controller {
       finalPrediction: null,
       isSent: 0,
       predictionVersion: Date.now(),
-      algorithmVersion: "V5.0"
+      algorithmVersion: "V5.1"
     };
 
     await DB.saveTask(env, newTask);
@@ -3227,86 +3407,218 @@ class Controller {
   static async handleScoreboard(env, chatId) {
     try {
       const archives = await DB.getArchives(env, 20); // 获取最近20期
-      
-      if (!archives || archives.length === 0) {
-        await ExternalService.sendMessage(env, chatId, 
-          `${CONFIG.EMOJI.score} <b>预测战绩</b>\n\n暂无已开奖的战绩记录。`
-        );
-        return;
-      }
+      const historyCount = await DB.getHistoryCount(env);
+      const archiveCount = await DB.getArchiveCount(env);
       
       // 计算统计信息
-      let totalMatches = 0;
-      let wins = 0;
-      let totalScore = 0;
-      let maxScore = 0;
-      let currentStreak = 0;
-      let maxStreak = 0;
-      let lastWasWin = false;
-      let currentStreakCount = 0;
-      
-      // 按时间顺序（从旧到新）计算连胜
-      const archivesByDate = [...archives].reverse();
-      
-      archivesByDate.forEach(archive => {
-        totalMatches++;
+      let stats = null;
+      if (archives && archives.length > 0) {
+        // 按时间顺序（从旧到新）计算连胜
+        const archivesByDate = [...archives].reverse();
         
-        if (archive.result_status === "WIN") {
-          wins++;
-          totalScore += parseFloat(archive.hit_detail?.match(/\d+/)?.[0] || "0");
+        let totalMatches = 0;
+        let wins = 0;
+        let totalScore = 0;
+        let maxScore = 0;
+        let currentStreak = 0;
+        let maxStreak = 0;
+        let lastWasWin = false;
+        let currentStreakCount = 0;
+        
+        archivesByDate.forEach(archive => {
+          totalMatches++;
           
-          const score = parseFloat(archive.hit_detail?.match(/\d+/)?.[0] || "0");
-          if (score > maxScore) maxScore = score;
-          
-          // 连胜计算
-          if (lastWasWin || currentStreakCount === 0) {
-            currentStreakCount++;
-            lastWasWin = true;
+          if (archive.result_status === "WIN") {
+            wins++;
+            
+            // 从hit_detail中提取得分
+            let score = 0;
+            const match = archive.hit_detail?.match(/得分:\s*(\d+)/);
+            if (match) {
+              score = parseInt(match[1]);
+            }
+            totalScore += score;
+            
+            if (score > maxScore) maxScore = score;
+            
+            // 连胜计算
+            if (lastWasWin || currentStreakCount === 0) {
+              currentStreakCount++;
+              lastWasWin = true;
+            } else {
+              currentStreakCount = 1;
+              lastWasWin = true;
+            }
           } else {
-            currentStreakCount = 1;
-            lastWasWin = true;
+            lastWasWin = false;
+            currentStreakCount = 0;
           }
-        } else {
-          lastWasWin = false;
-          currentStreakCount = 0;
+          
+          if (currentStreakCount > maxStreak) {
+            maxStreak = currentStreakCount;
+          }
+        });
+        
+        // 当前连胜（最近的状态）
+        const recentArchives = archives.slice(0, 10);
+        let recentStreak = 0;
+        for (const archive of recentArchives) {
+          if (archive.result_status === "WIN") {
+            recentStreak++;
+          } else {
+            break;
+          }
         }
         
-        if (currentStreakCount > maxStreak) {
-          maxStreak = currentStreakCount;
-        }
-      });
-      
-      // 当前连胜（最近的状态）
-      const recentArchives = archives.slice(0, 10);
-      let recentStreak = 0;
-      for (const archive of recentArchives) {
-        if (archive.result_status === "WIN") {
-          recentStreak++;
-        } else {
-          break;
-        }
+        const avgScore = totalMatches > 0 ? (totalScore / totalMatches).toFixed(1) : "0.0";
+        const winRate = totalMatches > 0 ? ((wins / totalMatches) * 100).toFixed(1) : "0.0";
+        
+        stats = {
+          totalMatches,
+          wins,
+          winRate,
+          avgScore,
+          maxScore: maxScore.toString(),
+          currentStreak: recentStreak,
+          maxStreak
+        };
       }
       
-      const avgScore = totalMatches > 0 ? totalScore / totalMatches : 0;
-      const winRate = totalMatches > 0 ? (wins / totalMatches * 100) : 0;
-      
-      const stats = {
-        totalMatches,
-        wins,
-        winRate: winRate.toFixed(1),
-        avgScore: avgScore.toFixed(1),
-        maxScore: maxScore.toFixed(0),
-        currentStreak: recentStreak,
-        maxStreak
-      };
-      
-      const message = MessageRenderer.renderScoreboard(archives, stats);
+      const message = MessageRenderer.renderScoreboard(archives, stats, historyCount, archiveCount);
       await ExternalService.sendMessage(env, chatId, message);
       
     } catch (error) {
       Logger.error("Scoreboard", "战绩统计失败", error);
       await ExternalService.sendMessage(env, chatId, 
         `❌ <b>获取战绩失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+
+  /**
+   * 手动更新战绩
+   */
+  static async handleUpdateScores(env, chatId) {
+    try {
+      Logger.info("UpdateScores", `开始手动更新战绩，chatId: ${chatId}`);
+      
+      const statusMsg = await ExternalService.sendMessage(env, chatId,
+        `${CONFIG.EMOJI.update} <b>开始更新战绩...</b>\n\n` +
+        `正在检查未更新的预测记录。\n` +
+        `开始时间: ${Formatter.formatBeijingTime()}`
+      );
+      
+      // 获取所有待更新的预测
+      const pendingArchives = await DB.getPendingArchives(env);
+      
+      if (!pendingArchives || pendingArchives.length === 0) {
+        await ExternalService.sendMessage(env, chatId,
+          `ℹ️ <b>没有待更新的预测记录</b>\n\n` +
+          `可能原因：\n` +
+          `1. 还未生成预测\n` +
+          `2. 预测已经全部更新\n` +
+          `3. 数据库中没有预测记录`
+        );
+        return;
+      }
+      
+      Logger.info("UpdateScores", `找到 ${pendingArchives.length} 条待更新记录`);
+      
+      // 获取所有历史记录用于匹配
+      const allHistory = await DB.getHistory(env);
+      const historyMap = new Map();
+      allHistory.forEach(h => historyMap.set(h.expect, h));
+      
+      let updatedCount = 0;
+      let matchedCount = 0;
+      let details = [];
+      
+      // 处理每条预测
+      for (const archive of pendingArchives) {
+        const history = historyMap.get(archive.expect);
+        
+        if (history) {
+          try {
+            const prediction = JSON.parse(archive.prediction_json);
+            const actualSpecial = parseInt(history.open_code.split(",")[6]);
+            const evaluation = PredictionEngine.evaluatePrediction(prediction, actualSpecial);
+            
+            const status = evaluation.totalScore >= 60 ? "WIN" : "LOSS";
+            const detail = `得分: ${evaluation.totalScore}, 等级: ${evaluation.grade}`;
+            
+            await DB.updateArchiveStatus(env, archive.expect, status, detail);
+            updatedCount++;
+            
+            if (status === "WIN") {
+              matchedCount++;
+              details.push(`✅ 第 ${archive.expect} 期: 得分 ${evaluation.totalScore} (${evaluation.grade})`);
+            } else {
+              details.push(`❌ 第 ${archive.expect} 期: 得分 ${evaluation.totalScore} (${evaluation.grade})`);
+            }
+            
+          } catch (error) {
+            Logger.error("UpdateScores", `处理第 ${archive.expect} 期失败`, error);
+            details.push(`⚠️ 第 ${archive.expect} 期: 处理失败 (${error.message})`);
+          }
+        } else {
+          details.push(`⏳ 第 ${archive.expect} 期: 等待开奖结果`);
+        }
+      }
+      
+      // 构建报告
+      let report = `✅ <b>战绩更新完成</b>\n\n`;
+      report += `待处理记录: ${pendingArchives.length} 条\n`;
+      report += `成功更新: ${updatedCount} 条\n`;
+      report += `预测命中: ${matchedCount} 次\n`;
+      
+      if (updatedCount > 0) {
+        report += `命中率: ${((matchedCount / updatedCount) * 100).toFixed(1)}%\n\n`;
+      }
+      
+      // 显示前5条详情
+      if (details.length > 0) {
+        report += `<b>📋 更新详情 (前5条):</b>\n`;
+        details.slice(0, 5).forEach(detail => {
+          report += `${detail}\n`;
+        });
+        
+        if (details.length > 5) {
+          report += `... 还有 ${details.length - 5} 条记录\n`;
+        }
+      }
+      
+      report += `\n────────────────\n`;
+      report += `现在可以点击"${BTNS.SCORE}"查看战绩了。`;
+      
+      await ExternalService.sendMessage(env, chatId, report);
+      
+      Logger.info("UpdateScores", `战绩更新完成: 更新 ${updatedCount} 条, 命中 ${matchedCount} 次`);
+      
+      // 删除状态消息
+      if (statusMsg && statusMsg.result && statusMsg.result.message_id) {
+        try {
+          await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/deleteMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              message_id: statusMsg.result.message_id
+            })
+          });
+        } catch (e) {
+          // 忽略删除错误
+        }
+      }
+      
+    } catch (error) {
+      Logger.error("UpdateScores", "战绩更新失败", error);
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>战绩更新失败</b>\n\n` +
+        `错误信息: <code>${error.message}</code>\n\n` +
+        `请确保:\n` +
+        `1. 数据库已正确初始化\n` +
+        `2. 已经同步了历史数据\n` +
+        `3. 已经生成了预测记录`
       );
     }
   }
@@ -3433,7 +3745,7 @@ class Controller {
 }
 
 // ==============================================================================
-// 9. 事件处理器 (Event Handlers) - 完整版（已修复）
+// 9. 事件处理器 (Event Handlers) - 完整修复版
 // ==============================================================================
 
 /**
@@ -3444,7 +3756,7 @@ async function handleCallback(env, query) {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   
-  Logger.info("Callback", `收到回调: ${data}, chatId: ${chatId}, messageId: ${messageId}`);
+  Logger.info("Callback", `收到回调: ${data}`, { chatId, messageId });
   
   // 立即响应回调，防止超时
   try {
@@ -3510,7 +3822,7 @@ async function handleUpdate(env, payload, ctx) {
   const text = msg.text.trim();
   const userId = msg.from ? String(msg.from.id) : "CHANNEL";
   
-  Logger.info("Update", `收到消息: ${text}, chatId: ${chatId}, userId: ${userId}`);
+  Logger.info("Update", `收到消息: ${text}`, { chatId, userId });
   
   // 3. 权限检查
   const isAdmin = (String(msg.from?.id) === String(env.TG_ADMIN_ID));
@@ -3525,7 +3837,14 @@ async function handleUpdate(env, payload, ctx) {
     return;
   }
   
-  // 5. 命令路由
+  // 5. 检查是否为频道消息（如果是则跳过非管理员处理）
+  const isChannel = msg.chat.type === "channel";
+  if (isChannel && !isAdmin) {
+    Logger.info("Update", `跳过频道消息处理: ${text.substring(0, 50)}...`);
+    return;
+  }
+  
+  // 6. 命令路由
   
   // --- 复盘回测指令 ---
   if (text.startsWith("复盘")) {
@@ -3556,6 +3875,12 @@ async function handleUpdate(env, payload, ctx) {
   }
   
   if (text.includes("AI 助手")) {
+    // 检查是否为频道
+    if (env.TG_CHANNEL_ID && String(chatId) === String(env.TG_CHANNEL_ID)) {
+      Logger.info("Update", `频道 ${chatId} 尝试使用AI助手，已跳过`);
+      return;
+    }
+    
     await ExternalService.sendMessage(env, chatId, 
       `${CONFIG.EMOJI.bot} <b>AI 对话模式</b>\n\n` +
       `请直接发送您的问题，我会从数据分析、概率学角度为您解答。\n\n` +
@@ -3672,10 +3997,15 @@ async function handleUpdate(env, payload, ctx) {
       ctx.waitUntil(Controller.handleForceLearn(env, chatId));
       return;
     }
+    
+    if (text === BTNS.UPDATE_SCORES) {
+      ctx.waitUntil(Controller.handleUpdateScores(env, chatId));
+      return;
+    }
   } else {
     // 非管理员尝试使用管理员功能
     const adminCommands = [BTNS.MANAGE, BTNS.SYNC, BTNS.RESET, BTNS.PUSH, BTNS.AUTO, 
-                          BTNS.TIME, BTNS.SCHEDULE, BTNS.LEARN];
+                          BTNS.TIME, BTNS.SCHEDULE, BTNS.LEARN, BTNS.UPDATE_SCORES];
     if (adminCommands.includes(text) || text.startsWith("SET_DUR_")) {
       await ExternalService.sendMessage(env, chatId, 
         "🚫 <b>权限不足</b>\n\n此功能仅限管理员使用。"
@@ -3684,9 +4014,28 @@ async function handleUpdate(env, payload, ctx) {
     }
   }
   
-  // --- AI 聊天（如果不是命令） ---
+  // --- AI 聊天（如果不是命令且不是频道消息） ---
   if (env.AI && !text.startsWith("/")) {
-    ctx.waitUntil(Controller.handleAIChat(env, chatId, text));
+    // 再次检查是否为频道消息
+    if (env.TG_CHANNEL_ID && String(chatId) === String(env.TG_CHANNEL_ID)) {
+      Logger.info("Update", `频道消息跳过AI处理: ${text.substring(0, 50)}...`);
+      return;
+    }
+    
+    // 检查是否为命令或导航
+    const commandList = [
+      "/start", CONFIG.SYSTEM.NAME, "返回大厅", "返回菜单",
+      BTNS.HELP, BTNS.STATUS, BTNS.REC, BTNS.PREVIEW, BTNS.SCORE,
+      BTNS.MANAGE, BTNS.SYNC, BTNS.RESET, BTNS.PUSH, BTNS.AUTO,
+      BTNS.TIME, BTNS.SCHEDULE, BTNS.LEARN, BTNS.UPDATE_SCORES
+    ];
+    
+    if (!commandList.includes(text) && 
+        !text.startsWith("复盘") && 
+        !text.startsWith("SET_DUR_") && 
+        !text.includes("定时")) {
+      ctx.waitUntil(Controller.handleAIChat(env, chatId, text));
+    }
   }
 }
 
@@ -3771,7 +4120,7 @@ async function handleCronJob(env) {
       }
     }
     
-    // 3. 自动归档战绩
+    // 3. 自动归档战绩（每天一次）
     const lastArchiveCheck = await DB.getSetting(env, "LAST_ARCHIVE_CHECK", "0");
     const checkInterval = 24 * 60 * 60 * 1000; // 24小时检查一次
     
@@ -3779,7 +4128,36 @@ async function handleCronJob(env) {
       Logger.info("Cron", "开始自动归档检查");
       
       try {
-        // 这里可以添加自动归档逻辑，比如检查未归档的预测等
+        // 自动更新待处理的战绩
+        const pendingArchives = await DB.getPendingArchives(env);
+        if (pendingArchives.length > 0) {
+          const allHistory = await DB.getHistory(env);
+          const historyMap = new Map();
+          allHistory.forEach(h => historyMap.set(h.expect, h));
+          
+          let updated = 0;
+          for (const archive of pendingArchives) {
+            const history = historyMap.get(archive.expect);
+            if (history) {
+              try {
+                const prediction = JSON.parse(archive.prediction_json);
+                const actualSpecial = parseInt(history.open_code.split(",")[6]);
+                const evaluation = PredictionEngine.evaluatePrediction(prediction, actualSpecial);
+                
+                const status = evaluation.totalScore >= 60 ? "WIN" : "LOSS";
+                const detail = `得分: ${evaluation.totalScore}, 等级: ${evaluation.grade}`;
+                
+                await DB.updateArchiveStatus(env, archive.expect, status, detail);
+                updated++;
+              } catch (e) {
+                Logger.error("Cron", `自动更新战绩失败 ${archive.expect}`, e);
+              }
+            }
+          }
+          
+          Logger.info("Cron", `自动归档完成: 更新 ${updated}/${pendingArchives.length} 条记录`);
+        }
+        
         await DB.saveSetting(env, "LAST_ARCHIVE_CHECK", Date.now().toString());
       } catch (error) {
         Logger.error("Cron", "自动归档检查失败", error);
@@ -3793,82 +4171,8 @@ async function handleCronJob(env) {
   }
 }
 
-/**
- * 初始化数据库
- */
-async function initDatabase(env) {
-  if (!env.DB) {
-    Logger.error("Init", "Database binding 'DB' not found");
-    return false;
-  }
-  
-  try {
-    // 创建表
-    const statements = [
-      // 历史开奖记录表
-      `CREATE TABLE IF NOT EXISTS lottery_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        expect TEXT UNIQUE, 
-        open_code TEXT, 
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`,
-      
-      // 创建索引
-      `CREATE INDEX IF NOT EXISTS idx_history_expect ON lottery_history (expect DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_history_created ON lottery_history (created_at DESC)`,
-      
-      // 预测任务表
-      `CREATE TABLE IF NOT EXISTS lottery_tasks (
-        id INTEGER PRIMARY KEY DEFAULT 1, 
-        data TEXT, 
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`,
-      
-      // 预测归档表
-      `CREATE TABLE IF NOT EXISTS prediction_archives (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        expect TEXT UNIQUE, 
-        prediction_json TEXT, 
-        result_status TEXT DEFAULT 'PENDING', 
-        hit_detail TEXT, 
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`,
-      
-      // 创建索引
-      `CREATE INDEX IF NOT EXISTS idx_archives_expect ON prediction_archives (expect DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_archives_status ON prediction_archives (result_status)`,
-      `CREATE INDEX IF NOT EXISTS idx_archives_created ON prediction_archives (created_at DESC)`,
-      
-      // 系统设置表
-      `CREATE TABLE IF NOT EXISTS lottery_settings (
-        setting_key TEXT PRIMARY KEY, 
-        value TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`
-    ];
-    
-    // 批量执行
-    const batch = statements.map(sql => env.DB.prepare(sql));
-    await env.DB.batch(batch);
-    
-    // 初始化默认设置
-    await DB.initDefaultSettings(env);
-    
-    Logger.info("Init", "数据库初始化完成");
-    return true;
-    
-  } catch (error) {
-    Logger.error("Init", "数据库初始化失败", error);
-    return false;
-  }
-}
-
 // ==============================================================================
-// 10. Worker 入口点 (Entry Point) - 完整版
+// 10. Worker 入口点 (Entry Point) - 完整修复版
 // ==============================================================================
 
 export default {
@@ -3879,7 +4183,7 @@ export default {
     Logger.info("Worker", "定时任务触发");
     
     // 初始化数据库
-    const initialized = await initDatabase(env);
+    const initialized = await DB.init(env);
     if (!initialized) {
       Logger.error("Worker", "数据库初始化失败，定时任务中止");
       return;
@@ -3893,22 +4197,38 @@ export default {
    * HTTP 请求入口
    */
   async fetch(request, env, ctx) {
-    // 记录请求信息
+    const startTime = Date.now();
     const url = new URL(request.url);
-    Logger.info("Worker", `收到请求: ${request.method} ${url.pathname}`);
+    
+    Logger.info("Worker", `收到请求: ${request.method} ${url.pathname}`, {
+      origin: request.headers.get('origin'),
+      userAgent: request.headers.get('user-agent')
+    });
+    
+    // 验证必要环境变量
+    const requiredEnvVars = ['TG_BOT_TOKEN', 'TG_ADMIN_ID'];
+    const missingVars = requiredEnvVars.filter(key => !env[key]);
+    
+    if (missingVars.length > 0) {
+      Logger.error("Worker", `缺少必要环境变量: ${missingVars.join(', ')}`);
+      return new Response(`Missing required environment variables: ${missingVars.join(', ')}`, { 
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    }
+    
+    // 设置环境变量到配置
+    CONFIG.SYSTEM.CHANNEL_ID = env.TG_CHANNEL_ID;
+    CONFIG.SYSTEM.ADMIN_ID = env.TG_ADMIN_ID;
     
     // 初始化数据库
-    const initialized = await initDatabase(env);
+    const initialized = await DB.init(env);
     if (!initialized) {
       return new Response("Database Initialization Failed. Please check D1 binding.", { 
         status: 500,
         headers: { 'Content-Type': 'text/plain' }
       });
     }
-    
-    // 设置环境变量
-    CONFIG.SYSTEM.CHANNEL_ID = env.TG_CHANNEL_ID;
-    CONFIG.SYSTEM.ADMIN_ID = env.TG_ADMIN_ID;
     
     // GET 请求处理
     if (request.method === "GET") {
@@ -3994,6 +4314,9 @@ export default {
             }
           };
           
+          const responseTime = Date.now() - startTime;
+          Logger.request("Health", "GET", "/health", 200, responseTime);
+          
           return new Response(JSON.stringify(healthData, null, 2), { 
             status: 200,
             headers: { 
@@ -4002,6 +4325,9 @@ export default {
             }
           });
         } catch (error) {
+          const responseTime = Date.now() - startTime;
+          Logger.request("Health", "GET", "/health", 500, responseTime);
+          
           return new Response(JSON.stringify({ 
             status: 'error',
             error: error.message,
@@ -4029,6 +4355,9 @@ export default {
       }
       
       // 默认首页
+      const responseTime = Date.now() - startTime;
+      Logger.request("Home", "GET", "/", 200, responseTime);
+      
       return new Response(`
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -4170,7 +4499,7 @@ export default {
             
             <div class="version">
               <p><strong>技术栈:</strong> Cloudflare Workers + D1 Database + AI + Telegram Bot API</p>
-              <p><strong>算法版本:</strong> V5.0 企业版 (马尔可夫链 + 遗漏值回归 + 动态权重调整)</p>
+              <p><strong>算法版本:</strong> V5.1 企业版 (马尔可夫链 + 遗漏值回归 + 动态权重调整)</p>
               <p><strong>数据安全:</strong> 所有数据加密存储，无个人信息收集</p>
               <p><strong>最后更新:</strong> ${new Date().toLocaleDateString('zh-CN')}</p>
             </div>
@@ -4194,15 +4523,24 @@ export default {
         // 异步处理，立即返回200响应给Telegram
         ctx.waitUntil(handleUpdate(env, payload, ctx));
         
+        const responseTime = Date.now() - startTime;
+        Logger.request("Webhook", "POST", "/", 200, responseTime);
+        
         return new Response("OK", { 
           status: 200,
           headers: { 'Content-Type': 'text/plain' }
         });
       } catch (e) {
         Logger.error("Webhook", "处理POST请求出错", e);
+        const responseTime = Date.now() - startTime;
+        Logger.request("Webhook", "POST", "/", 500, responseTime);
+        
         return new Response("OK", { status: 200 }); // 始终返回OK给Telegram
       }
     }
+    
+    const responseTime = Date.now() - startTime;
+    Logger.request("Other", request.method, url.pathname, 405, responseTime);
     
     return new Response("Method not allowed", { status: 405 });
   }
