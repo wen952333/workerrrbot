@@ -3107,6 +3107,11 @@ class Controller {
       
       const message = MessageRenderer.renderScheduleSettings(scheduleTime, lastPush);
       await ExternalService.sendMessage(env, chatId, message, KEYBOARDS.SCHEDULE_SETTINGS);
+
+      userStateManager.setState(chatId, {
+        state: "WAITING_SCHEDULE_TIME",
+        data: { action: "schedule" }
+      });
       
     } catch (error) {
       Logger.error("Schedule", "定时设置处理失败", error);
@@ -3659,11 +3664,6 @@ async function handleUpdate(env, payload, ctx) {
     }
     
     if (text.includes("定时")) {
-      // 进入定时设置状态
-      userStateManager.setState(chatId, { 
-        state: "WAITING_SCHEDULE_TIME",
-        data: { action: "schedule" }
-      });
       await Controller.handleScheduleSettings(env, chatId, text);
       return;
     }
