@@ -132,7 +132,8 @@ const CONFIG = {
     learn: "🧠",
     calendar: "📅",
     bell: "🔔",
-    update: "📈"
+    update: "📈",
+    flat: "📋"
   }
 };
 
@@ -152,7 +153,10 @@ const BTNS = {
   HELP: `${CONFIG.EMOJI.help} 使用帮助`,
   SCHEDULE: `${CONFIG.EMOJI.calendar} 定时设置`,
   STATUS: `${CONFIG.EMOJI.bell} 系统状态`,
-  UPDATE_SCORES: `${CONFIG.EMOJI.update} 更新战绩`
+  UPDATE_SCORES: `${CONFIG.EMOJI.update} 更新战绩`,
+  FLAT_PREDICT: `${CONFIG.EMOJI.flat} 平码预测`,
+  PATTERN_LIB: `${CONFIG.EMOJI.learn} 规律库`,
+  PATTERN_DISCOVERY: `${CONFIG.EMOJI.bot} 规律发现`
 };
 
 // 键盘布局定义（完整版）
@@ -170,8 +174,8 @@ const KEYBOARDS = {
   MAIN_MENU: {
     keyboard: [
       [{ text: BTNS.REC }, { text: BTNS.SCORE }],
-      [{ text: BTNS.PREVIEW }],
-      [{ text: BTNS.MANAGE }],
+      [{ text: BTNS.PREVIEW }, { text: BTNS.FLAT_PREDICT }],
+      [{ text: BTNS.MANAGE }, { text: BTNS.PATTERN_LIB }],
       [{ text: "🔙 返回大厅" }, { text: BTNS.HELP }]
     ],
     resize_keyboard: true
@@ -182,7 +186,7 @@ const KEYBOARDS = {
       [{ text: BTNS.PUSH }, { text: BTNS.RESET }],
       [{ text: BTNS.AUTO }, { text: BTNS.TIME }],
       [{ text: BTNS.SYNC }, { text: BTNS.SCHEDULE }],
-      [{ text: BTNS.LEARN }, { text: BTNS.STATUS }],
+      [{ text: BTNS.LEARN }, { text: BTNS.PATTERN_DISCOVERY }],
       [{ text: BTNS.UPDATE_SCORES }, { text: BTNS.BACK }]
     ],
     resize_keyboard: true
@@ -391,6 +395,470 @@ class UserStateManager {
   }
 }
 
+// ==============================================================================
+// 8.5 控制器扩展 (Controller Extensions)
+// ==============================================================================
+
+Object.assign(Controller, {
+  /**
+   * 处理平码预测
+   */
+  async handleFlatPrediction(env, chatId, messageId = null) {
+    try {
+      Logger.info("FlatPrediction", `处理平码预测请求，chatId: ${chatId}`);
+
+      let task = await DB.getTask(env);
+
+      // 如果没有任务，尝试初始化一个
+      if (!task) {
+        const history = await DB.getHistory(env);
+        if (history.length > 0) {
+          task = await Controller.initTask(env, history);
+          Logger.info("FlatPrediction", `初始化新任务: ${task.expect}`);
+        } else {
+          const message = `📋 <b>${CONFIG.SYSTEM.NAME} - 平码预测</b>\n当前无历史数据，无法生成平码预测。请先同步数据。`;
+
+          if (messageId) {
+            await ExternalService.editMessage(env, chatId, messageId, message);
+          } else {
+            await ExternalService.sendMessage(env, chatId, message);
+          }
+          return;
+        }
+      }
+
+      // 获取历史数据和规律
+      const allHistory = await DB.getHistory(env);
+      const flatAnalysis = FlatCodeAnalyzer.analyzeFlatHistory(allHistory);
+      const patterns = await DB.getAllPatterns(env, true);
+
+      // 获取上一期数据
+      let lastAttr = null;
+      if (allHistory.length > 0) {
+        const lastRecord = allHistory[0];
+        const lastSpecial = parseInt(lastRecord.open_code.split(",")[6]);
+        lastAttr = Formatter.getAttributes(lastSpecial);
+      }
+
+      // 生成平码预测
+      const prediction = FlatCodePredictor.generateFlatPrediction(
+        task,
+        flatAnalysis,
+        patterns,
+        lastAttr
+      );
+
+      // 渲染消息
+      const message = MessageRenderer.renderFlatPrediction(prediction);
+
+      if (messageId) {
+        await ExternalService.editMessage(env, chatId, messageId, message);
+      } else {
+        await ExternalService.sendMessage(env, chatId, message);
+      }
+
+      Logger.info("FlatPrediction", `平码预测发送完成: ${task.expect}, 置信度: ${prediction.confidence}%`);
+
+    } catch (error) {
+      Logger.error("FlatPrediction", "处理平码预测失败", error);
+
+      const errorMessage = `❌ <b>生成平码预测时发生错误</b>\n\n错误信息: <code>${error.message}</code>\n\n请稍后重试或联系管理员。`;
+
+      if (messageId) {
+        await ExternalService.editMessage(env, chatId, messageId, errorMessage);
+      } else {
+        await ExternalService.sendMessage(env, chatId, errorMessage);
+      }
+    }
+  },
+
+  /**
+   * 处理批量复盘
+   */
+  async handleBatchBacktest(env, chatId, rangeStart, rangeEnd, options = {}) {
+    try {
+      Logger.info("BatchBacktest", `批量复盘请求: ${rangeStart} - ${rangeEnd}, chatId: ${chatId}`);
+
+      // 验证参数
+      if (!rangeStart || !rangeEnd) {
+        await ExternalService.sendMessage(env, chatId,
+          "❌ <b>批量复盘格式错误</b>\n\n" +
+          "请使用: <code>批量复盘 起始期号 结束期号</code>\n" +
+          "例如: <code>批量复盘 2024001 2024120</code>\n\n" +
+          "或使用: <code>批量复盘 最近N期</code>\n" +
+          "例如: <code>批量复盘 最近50期</code>"
+        );
+        return;
+      }
+
+      // 处理"最近N期"格式
+      let startExpect = rangeStart;
+      let endExpect = rangeEnd;
+
+      if (rangeStart === "最近" && parseInt(rangeEnd)) {
+        const n = parseInt(rangeEnd);
+        const allHistory = await DB.getHistory(env);
+        if (allHistory.length < n) {
+          await ExternalService.sendMessage(env, chatId,
+            `❌ 历史数据不足，当前仅有 ${allHistory.length} 期数据，无法复盘最近 ${n} 期。`
+          );
+          return;
+        }
+
+        startExpect = allHistory[0].expect;
+        endExpect = allHistory[n - 1].expect;
+      }
+
+      // 获取历史数据
+      const allHistory = await DB.getHistory(env);
+      if (allHistory.length === 0) {
+        await ExternalService.sendMessage(env, chatId, "❌ 数据库为空，无法执行复盘。请先同步历史数据。");
+        return;
+      }
+
+      // 查找期号对应的索引
+      const startIndex = allHistory.findIndex(h => h.expect === startExpect);
+      const endIndex = allHistory.findIndex(h => h.expect === endExpect);
+
+      if (startIndex === -1 || endIndex === -1) {
+        await ExternalService.sendMessage(env, chatId,
+          `❌ 指定的期号范围不存在。\n起始期号 ${startExpect} 或结束期号 ${endExpect} 未找到。`
+        );
+        return;
+      }
+
+      if (startIndex < endIndex) {
+        await ExternalService.sendMessage(env, chatId,
+          `❌ 起始期号必须晚于结束期号。\n请确保起始期号是较新的期号。`
+        );
+        return;
+      }
+
+      const totalPeriods = startIndex - endIndex + 1;
+      if (totalPeriods > 500) {
+        await ExternalService.sendMessage(env, chatId,
+          `❌ 批量复盘最多支持500期。\n当前选择 ${totalPeriods} 期，请缩小范围。`
+        );
+        return;
+      }
+
+      // 创建批量复盘任务
+      const taskId = `BATCH_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const batchTask = {
+        taskId,
+        rangeStart: startExpect,
+        rangeEnd: endExpect,
+        status: 'PROCESSING',
+        progress: 0,
+        results: [],
+        settings: options
+      };
+
+      // 保存任务到数据库
+      await DB.createBatchTask(env, batchTask);
+
+      // 发送开始消息
+      const startMessage = await ExternalService.sendMessage(env, chatId,
+        `🚀 <b>批量复盘任务已启动</b>\n\n` +
+        `任务ID: <code>${taskId}</code>\n` +
+        `复盘范围: ${startExpect} - ${endExpect} (共${totalPeriods}期)\n` +
+        `开始时间: ${Formatter.formatBeijingTime()}\n\n` +
+        `⏳ 系统将逐期进行复盘分析，完成后会发送总结报告。\n` +
+        `预计耗时: ${Math.ceil(totalPeriods * 0.5)}-${Math.ceil(totalPeriods)} 秒`
+      );
+
+      // 异步执行批量复盘
+      // 注意：这里使用了ctx.waitUntil，在事件处理器中调用
+      return {
+        taskId,
+        startMessageId: startMessage?.result?.message_id,
+        totalPeriods,
+        batchTask
+      };
+
+    } catch (error) {
+      Logger.error("BatchBacktest", "批量复盘处理失败", error);
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>批量复盘启动失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+      throw error;
+    }
+  },
+
+  /**
+   * 执行批量复盘任务
+   */
+  async executeBatchBacktestTask(env, chatId, taskInfo, ctx) {
+    const { taskId, startMessageId, totalPeriods, batchTask } = taskInfo;
+
+    try {
+      // 执行批量复盘
+      const result = await BatchBacktestSystem.executeBatchBacktest(
+        env,
+        batchTask,
+        ctx
+      );
+
+      // 生成总结报告消息
+      const summaryMessage = MessageRenderer.renderBatchSummary(result.summary);
+
+      // 发送总结报告
+      await ExternalService.sendMessage(env, chatId, summaryMessage);
+
+      // 更新开始消息
+      if (startMessageId) {
+        await ExternalService.editMessage(env, chatId, startMessageId,
+          `✅ <b>批量复盘任务已完成</b>\n\n` +
+          `任务ID: <code>${taskId}</code>\n` +
+          `复盘范围: ${batchTask.rangeStart} - ${batchTask.rangeEnd}\n` +
+          `总期数: ${totalPeriods}期\n` +
+          `完成时间: ${Formatter.formatBeijingTime()}\n\n` +
+          `详细报告已发送。`
+        );
+      }
+
+      Logger.info("BatchBacktest", `批量复盘任务完成: ${taskId}`);
+
+    } catch (error) {
+      Logger.error("BatchBacktest", `执行批量复盘任务失败: ${taskId}`, error);
+
+      // 发送错误消息
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>批量复盘任务执行失败</b>\n\n` +
+        `任务ID: <code>${taskId}</code>\n` +
+        `错误信息: <code>${error.message}</code>\n\n` +
+        `请检查系统日志或联系管理员。`
+      );
+
+      // 更新开始消息
+      if (startMessageId) {
+        await ExternalService.editMessage(env, chatId, startMessageId,
+          `❌ <b>批量复盘任务失败</b>\n\n` +
+          `任务ID: <code>${taskId}</code>\n` +
+          `错误信息: <code>${error.message}</code>\n\n` +
+          `请检查系统状态后重试。`
+        );
+      }
+    }
+  },
+
+  /**
+   * 处理规律库查看
+   */
+  async handlePatternLibrary(env, chatId, page = 1, filter = "all") {
+    try {
+      const patterns = await DB.getAllPatterns(env);
+
+      if (patterns.length === 0) {
+        await ExternalService.sendMessage(env, chatId,
+          `📚 <b>规律特征库</b>\n\n` +
+          `当前规律库为空。\n` +
+          `请先使用"规律发现"功能或进行批量复盘来自动发现规律。`
+        );
+        return;
+      }
+
+      // 根据过滤器筛选
+      let filteredPatterns = patterns;
+      if (filter !== "all") {
+        filteredPatterns = patterns.filter(p => p.patternType?.includes(filter));
+      }
+
+      // 分页
+      const pageSize = 5;
+      const totalPages = Math.ceil(filteredPatterns.length / pageSize);
+      const currentPage = Math.max(1, Math.min(page, totalPages));
+      const startIndex = (currentPage - 1) * pageSize;
+      const pagePatterns = filteredPatterns.slice(startIndex, startIndex + pageSize);
+
+      // 渲染消息
+      const message = MessageRenderer.renderPatternLibrary(
+        pagePatterns,
+        currentPage,
+        totalPages,
+        filteredPatterns.length,
+        filter
+      );
+
+      // 创建翻页键盘
+      const keyboard = { inline_keyboard: [] };
+
+      // 翻页按钮
+      const pageRow = [];
+      if (currentPage > 1) {
+        pageRow.push({
+          text: "◀️ 上一页",
+          callback_data: `pattern_page_${currentPage - 1}_${filter}`
+        });
+      }
+
+      pageRow.push({
+        text: `📄 ${currentPage}/${totalPages}`,
+        callback_data: "pattern_current"
+      });
+
+      if (currentPage < totalPages) {
+        pageRow.push({
+          text: "下一页 ▶️",
+          callback_data: `pattern_page_${currentPage + 1}_${filter}`
+        });
+      }
+
+      keyboard.inline_keyboard.push(pageRow);
+
+      // 筛选按钮
+      const filterRow = [
+        { text: "全部", callback_data: "pattern_filter_all" },
+        { text: "生肖", callback_data: "pattern_filter_zodiac" },
+        { text: "尾数", callback_data: "pattern_filter_tail" },
+        { text: "波色", callback_data: "pattern_filter_color" },
+        { text: "平码", callback_data: "pattern_filter_flat" }
+      ];
+      keyboard.inline_keyboard.push(filterRow);
+
+      // 操作按钮
+      const actionRow = [
+        { text: "🔄 刷新规律", callback_data: "pattern_refresh" },
+        { text: "📊 规律统计", callback_data: "pattern_stats" },
+        { text: "🔙 返回菜单", callback_data: "back_to_menu" }
+      ];
+      keyboard.inline_keyboard.push(actionRow);
+
+      await ExternalService.sendMessage(env, chatId, message, keyboard);
+
+    } catch (error) {
+      Logger.error("PatternLibrary", "处理规律库查看失败", error);
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>获取规律库失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  },
+
+  /**
+   * 处理规律发现
+   */
+  async handlePatternDiscovery(env, chatId, ctx) {
+    try {
+      // 发送开始消息
+      const startMessage = await ExternalService.sendMessage(env, chatId,
+        `🧠 <b>开始自动规律发现</b>\n\n` +
+        `系统将分析历史数据，发现各种规律模式。\n` +
+        `这个过程可能需要几分钟时间...\n\n` +
+        `开始时间: ${Formatter.formatBeijingTime()}`
+      );
+
+      // 获取历史数据
+      const history = await DB.getHistory(env);
+      if (history.length < 50) {
+        await ExternalService.sendMessage(env, chatId,
+          `❌ 历史数据不足，需要至少50期数据才能进行规律发现。\n当前仅有 ${history.length} 期数据。`
+        );
+        return;
+      }
+
+      // 创建规律发现引擎
+      const discoveryEngine = new PatternDiscoveryEngine();
+
+      // 异步执行规律发现
+      ctx.waitUntil(this.executePatternDiscovery(
+        env,
+        chatId,
+        discoveryEngine,
+        history,
+        startMessage?.result?.message_id
+      ));
+
+    } catch (error) {
+      Logger.error("PatternDiscovery", "处理规律发现失败", error);
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>规律发现启动失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  },
+
+  /**
+   * 执行规律发现
+   */
+  async executePatternDiscovery(env, chatId, discoveryEngine, history, startMessageId) {
+    try {
+      // 执行规律发现
+      const patterns = await discoveryEngine.discoverAllPatterns(history, {
+        minConfidence: 0.55,
+        minSupport: 0.03
+      });
+
+      // 保存规律到数据库
+      if (patterns.length > 0) {
+        await DB.batchSavePatterns(env, patterns);
+      }
+
+      // 发送完成消息
+      const message =
+        `✅ <b>规律发现完成</b>\n\n` +
+        `分析数据: ${history.length} 期\n` +
+        `发现规律: ${patterns.length} 条\n\n` +
+        `<b>规律分类:</b>\n` +
+        `生肖规律: ${patterns.filter(p => p.patternType.includes('zodiac')).length} 条\n` +
+        `尾数规律: ${patterns.filter(p => p.patternType.includes('tail')).length} 条\n` +
+        `波色规律: ${patterns.filter(p => p.patternType.includes('color')).length} 条\n` +
+        `平码规律: ${patterns.filter(p => p.patternType.includes('flat')).length} 条\n` +
+        `复合规律: ${patterns.filter(p => p.patternType.includes('complex')).length} 条\n\n` +
+        `📊 <b>Top 5 高置信度规律:</b>\n` +
+        patterns.slice(0, 5).map((p, i) =>
+          `${i+1}. ${p.patternName} (${(p.statistics.confidence * 100).toFixed(1)}%)`
+        ).join('\n') +
+        `\n\n⏰ <b>完成时间:</b> ${Formatter.formatBeijingTime()}`;
+
+      await ExternalService.sendMessage(env, chatId, message);
+
+      // 更新开始消息
+      if (startMessageId) {
+        await ExternalService.editMessage(env, chatId, startMessageId,
+          `✅ <b>规律发现已完成</b>\n\n` +
+          `详细结果已发送。`
+        );
+      }
+
+      Logger.info("PatternDiscovery", `规律发现完成: ${patterns.length} 条规律`);
+
+    } catch (error) {
+      Logger.error("PatternDiscovery", "执行规律发现失败", error);
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>规律发现执行失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  },
+
+  /**
+   * 处理规律状态切换
+   */
+  async handlePatternToggle(env, chatId, patternId, enable) {
+    try {
+      const result = await DB.updatePatternStatus(env, patternId, enable);
+
+      if (result && result.changes > 0) {
+        await ExternalService.sendMessage(env, chatId,
+          `✅ <b>规律状态已更新</b>\n\n` +
+          `规律ID: <code>${patternId}</code>\n` +
+          `新状态: ${enable ? '✅ 启用' : '❌ 停用'}\n\n` +
+          `此规律将在下次预测时${enable ? '生效' : '失效'}。`
+        );
+      } else {
+        await ExternalService.sendMessage(env, chatId,
+          `❌ <b>规律状态更新失败</b>\n\n` +
+          `未找到规律ID: <code>${patternId}</code>\n` +
+          `请检查规律ID是否正确。`
+        );
+      }
+    } catch (error) {
+      Logger.error("PatternToggle", "处理规律状态切换失败", error);
+      await ExternalService.sendMessage(env, chatId,
+        `❌ <b>规律状态更新失败</b>\n\n错误信息: <code>${error.message}</code>`
+      );
+    }
+  }
+});
+
 const userStateManager = new UserStateManager();
 
 // ==============================================================================
@@ -455,7 +923,76 @@ const DB = {
           value TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`
+        )`,
+
+        // 规律特征库表
+        `CREATE TABLE IF NOT EXISTS pattern_library (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pattern_id TEXT UNIQUE,
+          pattern_type TEXT,
+          pattern_name TEXT,
+          pattern_data TEXT,
+          confidence REAL DEFAULT 0.0,
+          total_occurrences INTEGER DEFAULT 0,
+          hit_count INTEGER DEFAULT 0,
+          recent_performance REAL DEFAULT 0.0,
+          stability REAL DEFAULT 0.0,
+          is_active BOOLEAN DEFAULT 1,
+          weight REAL DEFAULT 1.0,
+          priority INTEGER DEFAULT 5,
+          applicable_phases TEXT,
+          first_seen TIMESTAMP,
+          last_seen TIMESTAMP,
+          last_used TIMESTAMP,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+
+        // 平码预测记录表
+        `CREATE TABLE IF NOT EXISTS flatcode_predictions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          expect TEXT,
+          prediction_json TEXT,
+          actual_result TEXT,
+          hit_detail TEXT,
+          accuracy_score REAL,
+          applied_patterns TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+
+        // 批量复盘任务表
+        `CREATE TABLE IF NOT EXISTS batch_backtest_tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT UNIQUE,
+          range_start TEXT,
+          range_end TEXT,
+          status TEXT DEFAULT 'PENDING',
+          progress REAL DEFAULT 0.0,
+          results_json TEXT,
+          settings_json TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+
+        // 规律应用记录表
+        `CREATE TABLE IF NOT EXISTS pattern_application_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pattern_id TEXT,
+          expect TEXT,
+          application_context TEXT,
+          hit_result BOOLEAN,
+          impact_score REAL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+
+        // 创建索引
+        `CREATE INDEX IF NOT EXISTS idx_pattern_type ON pattern_library (pattern_type)`,
+        `CREATE INDEX IF NOT EXISTS idx_pattern_confidence ON pattern_library (confidence DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_pattern_active ON pattern_library (is_active)`,
+        `CREATE INDEX IF NOT EXISTS idx_flat_expect ON flatcode_predictions (expect DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_batch_status ON batch_backtest_tasks (status)`,
+        `CREATE INDEX IF NOT EXISTS idx_log_pattern ON pattern_application_logs (pattern_id)`
       ];
       
       // 批量执行
@@ -975,6 +1512,327 @@ const DB = {
     }
   }
 };
+
+// ==============================================================================
+// 3.5 数据库扩展模块 (Database Extensions)
+// ==============================================================================
+
+// 扩展DB对象，添加新功能
+Object.assign(DB, {
+  /**
+   * 批量添加或更新规律
+   */
+  batchSavePatterns: async (env, patterns) => {
+    try {
+      const batch = patterns.map(pattern => {
+        const now = new Date().toISOString();
+        const patternData = JSON.stringify(pattern);
+
+        return env.DB.prepare(
+          `INSERT OR REPLACE INTO pattern_library
+           (pattern_id, pattern_type, pattern_name, pattern_data,
+           confidence, total_occurrences, hit_count, recent_performance, stability,
+           is_active, weight, priority, applicable_phases,
+           first_seen, last_seen, last_used, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          pattern.patternId,
+          pattern.patternType,
+          pattern.patternName,
+          patternData,
+          pattern.statistics.confidence || 0,
+          pattern.statistics.totalOccurrences || 0,
+          pattern.statistics.hitCount || 0,
+          pattern.statistics.recentPerformance || 0,
+          pattern.statistics.stability || 0,
+          pattern.application?.isActive ? 1 : 0,
+          pattern.application?.weight || 1.0,
+          pattern.application?.priority || 5,
+          JSON.stringify(pattern.application?.applicablePhases || ['prediction', 'flat_prediction']),
+          pattern.statistics.firstSeen || now,
+          pattern.statistics.lastSeen || now,
+          pattern.application?.lastUsed || now,
+          now,
+          now
+        );
+      });
+
+      await env.DB.batch(batch);
+      Logger.info("DB", `批量保存 ${patterns.length} 条规律`);
+      return { success: true, count: patterns.length };
+    } catch (e) {
+      Logger.error("DB", "batchSavePatterns failed", e);
+      return { success: false, error: e.message };
+    }
+  },
+
+  /**
+   * 获取所有规律
+   */
+  getAllPatterns: async (env, activeOnly = false) => {
+    try {
+      let sql = "SELECT * FROM pattern_library";
+      if (activeOnly) {
+        sql += " WHERE is_active = 1";
+      }
+      sql += " ORDER BY priority DESC, confidence DESC";
+
+      const { results } = await env.DB.prepare(sql).all();
+
+      return results.map(row => {
+        try {
+          const patternData = JSON.parse(row.pattern_data || '{}');
+          return {
+            ...patternData,
+            dbId: row.id,
+            patternId: row.pattern_id,
+            patternType: row.pattern_type,
+            patternName: row.pattern_name,
+            statistics: {
+              confidence: row.confidence,
+              totalOccurrences: row.total_occurrences,
+              hitCount: row.hit_count,
+              recentPerformance: row.recent_performance,
+              stability: row.stability,
+              firstSeen: row.first_seen,
+              lastSeen: row.last_seen
+            },
+            application: {
+              isActive: row.is_active === 1,
+              weight: row.weight,
+              priority: row.priority,
+              applicablePhases: JSON.parse(row.applicable_phases || '[]'),
+              lastUsed: row.last_used
+            },
+            created_at: row.created_at,
+            updated_at: row.updated_at
+          };
+        } catch (e) {
+          Logger.error("DB", `解析规律数据失败: ${row.pattern_id}`, e);
+          return null;
+        }
+      }).filter(p => p !== null);
+    } catch (e) {
+      Logger.error("DB", "getAllPatterns failed", e);
+      return [];
+    }
+  },
+
+  /**
+   * 更新规律状态
+   */
+  updatePatternStatus: async (env, patternId, status) => {
+    try {
+      return await env.DB.prepare(
+        "UPDATE pattern_library SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE pattern_id = ?"
+      ).bind(status ? 1 : 0, patternId).run();
+    } catch (e) {
+      Logger.error("DB", `updatePatternStatus failed for ${patternId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 删除规律
+   */
+  deletePattern: async (env, patternId) => {
+    try {
+      return await env.DB.prepare(
+        "DELETE FROM pattern_library WHERE pattern_id = ?"
+      ).bind(patternId).run();
+    } catch (e) {
+      Logger.error("DB", `deletePattern failed for ${patternId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 保存平码预测记录
+   */
+  saveFlatPrediction: async (env, prediction) => {
+    try {
+      return await env.DB.prepare(
+        `INSERT INTO flatcode_predictions
+         (expect, prediction_json, actual_result, hit_detail, accuracy_score, applied_patterns)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(
+        prediction.expect,
+        JSON.stringify(prediction.prediction),
+        prediction.actualResult,
+        prediction.hitDetail,
+        prediction.accuracyScore,
+        JSON.stringify(prediction.appliedPatterns || [])
+      ).run();
+    } catch (e) {
+      Logger.error("DB", `saveFlatPrediction failed for ${prediction.expect}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取平码预测历史
+   */
+  getFlatPredictions: async (env, limit = 10, offset = 0) => {
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM flatcode_predictions ORDER BY created_at DESC LIMIT ? OFFSET ?"
+      ).bind(limit, offset).all();
+
+      return results.map(row => ({
+        id: row.id,
+        expect: row.expect,
+        prediction: JSON.parse(row.prediction_json || '{}'),
+        actualResult: row.actual_result,
+        hitDetail: row.hit_detail,
+        accuracyScore: row.accuracy_score,
+        appliedPatterns: JSON.parse(row.applied_patterns || '[]'),
+        createdAt: row.created_at
+      }));
+    } catch (e) {
+      Logger.error("DB", "getFlatPredictions failed", e);
+      return [];
+    }
+  },
+
+  /**
+   * 创建批量复盘任务
+   */
+  createBatchTask: async (env, task) => {
+    try {
+      return await env.DB.prepare(
+        `INSERT INTO batch_backtest_tasks
+         (task_id, range_start, range_end, status, progress, results_json, settings_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        task.taskId,
+        task.rangeStart,
+        task.rangeEnd,
+        task.status || 'PENDING',
+        task.progress || 0,
+        JSON.stringify(task.results || []),
+        JSON.stringify(task.settings || {})
+      ).run();
+    } catch (e) {
+      Logger.error("DB", `createBatchTask failed for ${task.taskId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 更新批量任务进度
+   */
+  updateBatchTaskProgress: async (env, taskId, progress, results) => {
+    try {
+      return await env.DB.prepare(
+        `UPDATE batch_backtest_tasks SET
+         progress = ?, results_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE task_id = ?`
+      ).bind(
+        progress,
+        JSON.stringify(results || []),
+        taskId
+      ).run();
+    } catch (e) {
+      Logger.error("DB", `updateBatchTaskProgress failed for ${taskId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 完成批量任务
+   */
+  completeBatchTask: async (env, taskId, results, summary) => {
+    try {
+      return await env.DB.prepare(
+        `UPDATE batch_backtest_tasks SET
+         status = 'COMPLETED', progress = 1.0, results_json = ?,
+         settings_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE task_id = ?`
+      ).bind(
+        JSON.stringify(results || []),
+        JSON.stringify({ summary, completedAt: new Date().toISOString() }),
+        taskId
+      ).run();
+    } catch (e) {
+      Logger.error("DB", `completeBatchTask failed for ${taskId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取批量任务
+   */
+  getBatchTask: async (env, taskId) => {
+    try {
+      const result = await env.DB.prepare(
+        "SELECT * FROM batch_backtest_tasks WHERE task_id = ?"
+      ).bind(taskId).first();
+
+      if (!result) return null;
+
+      return {
+        taskId: result.task_id,
+        rangeStart: result.range_start,
+        rangeEnd: result.range_end,
+        status: result.status,
+        progress: result.progress,
+        results: JSON.parse(result.results_json || '[]'),
+        settings: JSON.parse(result.settings_json || '{}'),
+        createdAt: result.created_at,
+        updatedAt: result.updated_at
+      };
+    } catch (e) {
+      Logger.error("DB", `getBatchTask failed for ${taskId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 记录规律应用
+   */
+  logPatternApplication: async (env, patternId, expect, context, hit, impact) => {
+    try {
+      return await env.DB.prepare(
+        `INSERT INTO pattern_application_logs
+         (pattern_id, expect, application_context, hit_result, impact_score)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(
+        patternId,
+        expect,
+        JSON.stringify(context),
+        hit ? 1 : 0,
+        impact
+      ).run();
+    } catch (e) {
+      Logger.error("DB", `logPatternApplication failed for ${patternId}`, e);
+      return null;
+    }
+  },
+
+  /**
+   * 获取规律应用统计
+   */
+  getPatternStats: async (env, patternId, limit = 100) => {
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM pattern_application_logs
+         WHERE pattern_id = ? ORDER BY created_at DESC LIMIT ?`
+      ).bind(patternId, limit).all();
+
+      return results.map(row => ({
+        patternId: row.pattern_id,
+        expect: row.expect,
+        context: JSON.parse(row.application_context || '{}'),
+        hitResult: row.hit_result === 1,
+        impactScore: row.impact_score,
+        createdAt: row.created_at
+      }));
+    } catch (e) {
+      Logger.error("DB", `getPatternStats failed for ${patternId}`, e);
+      return [];
+    }
+  }
+});
 
 // ==============================================================================
 // 4. 数学与统计分析引擎 (Mathematical & Statistical Engine) - 完整版
@@ -1799,6 +2657,2485 @@ class PredictionEngine {
 }
 
 // ==============================================================================
+// 5.5 平码分析引擎 (Flat Code Analysis Engine)
+// ==============================================================================
+
+class FlatCodeAnalyzer {
+  /**
+   * 分析平码历史数据
+   */
+  static analyzeFlatHistory(history, lookbackPeriod = 100) {
+    const recentHistory = history.slice(0, Math.min(lookbackPeriod, history.length));
+
+    const analysis = {
+      // 基础统计
+      zodiacStats: this.analyzeZodiacStats(recentHistory),
+      tailStats: this.analyzeTailStats(recentHistory),
+      headStats: this.analyzeHeadStats(recentHistory),
+      sizeStats: this.analyzeSizeStats(recentHistory),
+      parityStats: this.analyzeParityStats(recentHistory),
+
+      // 规律发现
+      patterns: this.discoverFlatPatterns(recentHistory),
+
+      // 综合统计
+      totalPeriods: recentHistory.length,
+      avgZodiacsPerPeriod: 0,
+      avgTailsPerPeriod: 0,
+      specialInFlatRate: 0
+    };
+
+    // 计算平均值
+    let totalZodiacs = 0;
+    let totalTails = 0;
+    let specialInFlatCount = 0;
+
+    recentHistory.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const special = codes[6];
+      const flatCodes = codes.slice(0, 6);
+
+      // 统计每期生肖数
+      const zodiacs = new Set();
+      flatCodes.forEach(code => {
+        zodiacs.add(Formatter.getAttributes(code).zodiac);
+      });
+      totalZodiacs += zodiacs.size;
+
+      // 统计每期尾数
+      const tails = new Set();
+      flatCodes.forEach(code => {
+        tails.add(code % 10);
+      });
+      totalTails += tails.size;
+
+      // 特码是否在平码中
+      if (flatCodes.includes(special)) {
+        specialInFlatCount++;
+      }
+    });
+
+    analysis.avgZodiacsPerPeriod = totalZodiacs / recentHistory.length;
+    analysis.avgTailsPerPeriod = totalTails / recentHistory.length;
+    analysis.specialInFlatRate = specialInFlatCount / recentHistory.length;
+
+    return analysis;
+  }
+
+  /**
+   * 分析平码生肖统计
+   */
+  static analyzeZodiacStats(history) {
+    const stats = {
+      frequency: {},
+      periodFrequency: {},
+      consecutiveStats: {},
+      combinations: []
+    };
+
+    // 初始化
+    Object.keys(CONFIG.ZODIAC_MAP).forEach(zodiac => {
+      stats.frequency[zodiac] = 0;
+      stats.periodFrequency[zodiac] = 0;
+      stats.consecutiveStats[zodiac] = { single: 0, double: 0, triple: 0, more: 0 };
+    });
+
+    // 统计
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      const zodiacsInPeriod = new Set();
+      flatCodes.forEach(code => {
+        const zodiac = Formatter.getAttributes(code).zodiac;
+        stats.frequency[zodiac]++;
+        zodiacsInPeriod.add(zodiac);
+      });
+
+      // 记录每期出现的生肖
+      zodiacsInPeriod.forEach(zodiac => {
+        stats.periodFrequency[zodiac]++;
+      });
+
+      // 统计组合
+      const zodiacList = Array.from(zodiacsInPeriod).sort();
+      stats.combinations.push(zodiacList.join(","));
+    });
+
+    // 统计生肖组合频率
+    const combinationStats = {};
+    stats.combinations.forEach(combo => {
+      combinationStats[combo] = (combinationStats[combo] || 0) + 1;
+    });
+
+    // 取出现频率最高的组合
+    stats.topCombinations = Object.entries(combinationStats)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([combo, count]) => ({ combo, count, rate: count / history.length }));
+
+    return stats;
+  }
+
+  /**
+   * 分析平码尾数统计
+   */
+  static analyzeTailStats(history) {
+    const stats = {
+      frequency: {},
+      periodFrequency: {},
+      combinations: [],
+      sameTailStats: {}
+    };
+
+    // 初始化
+    for (let i = 0; i < 10; i++) {
+      stats.frequency[i] = 0;
+      stats.periodFrequency[i] = 0;
+      stats.sameTailStats[i] = { single: 0, double: 0, triple: 0 };
+    }
+
+    // 统计
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      // 统计尾数频率
+      const tailCounts = {};
+      flatCodes.forEach(code => {
+        const tail = code % 10;
+        stats.frequency[tail]++;
+        tailCounts[tail] = (tailCounts[tail] || 0) + 1;
+      });
+
+      // 记录每期出现的尾数
+      Object.keys(tailCounts).forEach(tail => {
+        stats.periodFrequency[parseInt(tail)]++;
+      });
+
+      // 统计同尾数情况
+      Object.entries(tailCounts).forEach(([tail, count]) => {
+        if (count === 2) stats.sameTailStats[tail].double++;
+        else if (count === 3) stats.sameTailStats[tail].triple++;
+        else if (count > 3) stats.sameTailStats[tail].more++;
+      });
+
+      // 记录尾数组合
+      const tails = Object.keys(tailCounts).sort((a, b) => a - b);
+      stats.combinations.push(tails.join(","));
+    });
+
+    // 统计组合频率
+    const combinationStats = {};
+    stats.combinations.forEach(combo => {
+      combinationStats[combo] = (combinationStats[combo] || 0) + 1;
+    });
+
+    stats.topCombinations = Object.entries(combinationStats)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([combo, count]) => ({
+        combo,
+        count,
+        rate: count / history.length,
+        tailCount: combo.split(",").length
+      }));
+
+    return stats;
+  }
+
+  /**
+   * 分析头数统计
+   */
+  static analyzeHeadStats(history) {
+    const stats = {
+      frequency: {},
+      periodFrequency: {}
+    };
+
+    // 初始化
+    for (let i = 0; i <= 4; i++) {
+      stats.frequency[i] = 0;
+      stats.periodFrequency[i] = 0;
+    }
+
+    // 统计
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      const headsInPeriod = new Set();
+      flatCodes.forEach(code => {
+        const head = Math.floor(code / 10);
+        stats.frequency[head]++;
+        headsInPeriod.add(head);
+      });
+
+      headsInPeriod.forEach(head => {
+        stats.periodFrequency[head]++;
+      });
+    });
+
+    return stats;
+  }
+
+  /**
+   * 分析大小统计 (1-24为小，25-49为大)
+   */
+  static analyzeSizeStats(history) {
+    const stats = {
+      small: 0,
+      big: 0,
+      ratioByPeriod: []
+    };
+
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      let smallCount = 0;
+      let bigCount = 0;
+
+      flatCodes.forEach(code => {
+        if (code <= 24) smallCount++;
+        else bigCount++;
+      });
+
+      stats.small += smallCount;
+      stats.big += bigCount;
+      stats.ratioByPeriod.push({
+        small: smallCount,
+        big: bigCount,
+        ratio: smallCount / (smallCount + bigCount)
+      });
+    });
+
+    stats.avgSmallPerPeriod = stats.small / history.length;
+    stats.avgBigPerPeriod = stats.big / history.length;
+    stats.avgRatio = stats.small / (stats.small + stats.big);
+
+    return stats;
+  }
+
+  /**
+   * 分析奇偶统计
+   */
+  static analyzeParityStats(history) {
+    const stats = {
+      odd: 0,
+      even: 0,
+      ratioByPeriod: []
+    };
+
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      let oddCount = 0;
+      let evenCount = 0;
+
+      flatCodes.forEach(code => {
+        if (code % 2 === 0) evenCount++;
+        else oddCount++;
+      });
+
+      stats.odd += oddCount;
+      stats.even += evenCount;
+      stats.ratioByPeriod.push({
+        odd: oddCount,
+        even: evenCount,
+        ratio: oddCount / (oddCount + evenCount)
+      });
+    });
+
+    stats.avgOddPerPeriod = stats.odd / history.length;
+    stats.avgEvenPerPeriod = stats.even / history.length;
+    stats.avgRatio = stats.odd / (stats.odd + stats.even);
+
+    return stats;
+  }
+
+  /**
+   * 发现平码规律
+   */
+  static discoverFlatPatterns(history) {
+    const patterns = [];
+
+    // 规律1: 平码生肖分布规律
+    const zodiacPatterns = this.discoverZodiacPatterns(history);
+    patterns.push(...zodiacPatterns);
+
+    // 规律2: 平码尾数规律
+    const tailPatterns = this.discoverTailPatterns(history);
+    patterns.push(...tailPatterns);
+
+    // 规律3: 大小奇偶规律
+    const distributionPatterns = this.discoverDistributionPatterns(history);
+    patterns.push(...distributionPatterns);
+
+    return patterns;
+  }
+
+  /**
+   * 发现生肖规律
+   */
+  static discoverZodiacPatterns(history) {
+    const patterns = [];
+
+    // 统计生肖在平码中的出现频率
+    const zodiacStats = {};
+    Object.keys(CONFIG.ZODIAC_MAP).forEach(zodiac => {
+      zodiacStats[zodiac] = { periods: 0, total: 0 };
+    });
+
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      const zodiacsInPeriod = new Set();
+      flatCodes.forEach(code => {
+        const zodiac = Formatter.getAttributes(code).zodiac;
+        zodiacStats[zodiac].total++;
+        zodiacsInPeriod.add(zodiac);
+      });
+
+      zodiacsInPeriod.forEach(zodiac => {
+        zodiacStats[zodiac].periods++;
+      });
+    });
+
+    // 规律1: 高频生肖
+    Object.entries(zodiacStats).forEach(([zodiac, stats]) => {
+      const periodRate = stats.periods / history.length;
+      if (periodRate >= 0.7) {
+        patterns.push({
+          patternId: `FLAT_ZODIAC_HIGH_${zodiac}`,
+          patternType: "flat_zodiac_high",
+          patternName: `平码高频生肖: ${zodiac}`,
+          description: `生肖${zodiac}在平码中出现频率极高`,
+          condition: { type: "always" },
+          result: {
+            zodiac: zodiac,
+            type: "flat_zodiac_high",
+            impact: 0.6,
+            periodRate: periodRate
+          },
+          statistics: {
+            confidence: periodRate,
+            support: 1.0,
+            totalOccurrences: history.length,
+            hitCount: stats.periods
+          }
+        });
+      }
+    });
+
+    // 规律2: 生肖搭配
+    const zodiacCombinations = new Map();
+
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      const zodiacs = flatCodes.map(code => Formatter.getAttributes(code).zodiac);
+      const sortedZodiacs = [...new Set(zodiacs)].sort();
+
+      if (sortedZodiacs.length >= 3) {
+        // 生成所有3生肖组合
+        for (let i = 0; i < sortedZodiacs.length - 2; i++) {
+          for (let j = i + 1; j < sortedZodiacs.length - 1; j++) {
+            for (let k = j + 1; k < sortedZodiacs.length; k++) {
+              const combo = [sortedZodiacs[i], sortedZodiacs[j], sortedZodiacs[k]].sort().join(",");
+              zodiacCombinations.set(combo, (zodiacCombinations.get(combo) || 0) + 1);
+            }
+          }
+        }
+      }
+    });
+
+    // 取高频组合
+    Array.from(zodiacCombinations.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .forEach(([combo, count]) => {
+        const rate = count / history.length;
+        if (rate >= 0.3) {
+          const zodiacs = combo.split(",");
+          patterns.push({
+            patternId: `FLAT_ZODIAC_COMBO_${combo.replace(/,/g, "_")}`,
+            patternType: "flat_zodiac_combo",
+            patternName: `平码生肖组合: ${combo}`,
+            description: `生肖组合 ${combo} 在平码中经常一起出现`,
+            condition: { type: "always" },
+            result: {
+              zodiacs: zodiacs,
+              type: "flat_zodiac_combo",
+              impact: 0.4,
+              rate: rate
+            },
+            statistics: {
+              confidence: rate,
+              support: 1.0,
+              totalOccurrences: history.length,
+              hitCount: count
+            }
+          });
+        }
+      });
+
+    return patterns;
+  }
+
+  /**
+   * 发现尾数规律
+   */
+  static discoverTailPatterns(history) {
+    const patterns = [];
+
+    // 统计每期尾数数量
+    const tailCountStats = [];
+    const tailCombinations = new Map();
+
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      const tails = new Set();
+      flatCodes.forEach(code => {
+        tails.add(code % 10);
+      });
+
+      tailCountStats.push(tails.size);
+
+      // 记录尾数组合
+      const sortedTails = Array.from(tails).sort((a, b) => a - b);
+      const comboKey = sortedTails.join(",");
+      tailCombinations.set(comboKey, (tailCombinations.get(comboKey) || 0) + 1);
+    });
+
+    // 规律1: 尾数数量范围
+    const minTails = Math.min(...tailCountStats);
+    const maxTails = Math.max(...tailCountStats);
+    const avgTails = tailCountStats.reduce((a, b) => a + b, 0) / tailCountStats.length;
+
+    patterns.push({
+      patternId: "FLAT_TAIL_COUNT_RANGE",
+      patternType: "flat_tail_count_range",
+      patternName: "平码尾数数量范围",
+      description: `平码尾数通常为${minTails}-${maxTails}个，平均${avgTails.toFixed(1)}个`,
+      condition: { type: "always" },
+      result: {
+        min: minTails,
+        max: maxTails,
+        expected: avgTails,
+        type: "flat_tail_count",
+        impact: 0.8
+      },
+      statistics: {
+        confidence: 0.95,
+        support: 1.0,
+        totalOccurrences: history.length,
+        hitCount: history.length
+      }
+    });
+
+    // 规律2: 高频尾数组合
+    Array.from(tailCombinations.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .forEach(([combo, count]) => {
+        const rate = count / history.length;
+        if (rate >= 0.2) {
+          patterns.push({
+            patternId: `FLAT_TAIL_COMBO_${combo.replace(/,/g, "_")}`,
+            patternType: "flat_tail_combo",
+            patternName: `平码尾数组合: ${combo}`,
+            description: `尾数组合 ${combo} 在平码中经常出现`,
+            condition: { type: "always" },
+            result: {
+              tails: combo.split(",").map(t => parseInt(t)),
+              type: "flat_tail_combo",
+              impact: 0.5,
+              rate: rate
+            },
+            statistics: {
+              confidence: rate,
+              support: 1.0,
+              totalOccurrences: history.length,
+              hitCount: count
+            }
+          });
+        }
+      });
+
+    return patterns;
+  }
+
+  /**
+   * 发现分布规律
+   */
+  static discoverDistributionPatterns(history) {
+    const patterns = [];
+
+    // 统计大小比例
+    const sizeRatios = [];
+    const parityRatios = [];
+
+    history.forEach(record => {
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+
+      let smallCount = 0;
+      let bigCount = 0;
+      let oddCount = 0;
+      let evenCount = 0;
+
+      flatCodes.forEach(code => {
+        if (code <= 24) smallCount++;
+        else bigCount++;
+
+        if (code % 2 === 0) evenCount++;
+        else oddCount++;
+      });
+
+      sizeRatios.push(smallCount / 6);
+      parityRatios.push(oddCount / 6);
+    });
+
+    // 计算平均比例
+    const avgSizeRatio = sizeRatios.reduce((a, b) => a + b, 0) / sizeRatios.length;
+    const avgParityRatio = parityRatios.reduce((a, b) => a + b, 0) / parityRatios.length;
+
+    // 规律1: 大小比例平衡
+    patterns.push({
+      patternId: "FLAT_SIZE_BALANCE",
+      patternType: "flat_size_balance",
+      patternName: "平码大小比例平衡",
+      description: `平码大小比例趋于平衡，小号平均占比${(avgSizeRatio * 100).toFixed(1)}%`,
+      condition: { type: "always" },
+      result: {
+        smallRatio: avgSizeRatio,
+        bigRatio: 1 - avgSizeRatio,
+        type: "flat_size_balance",
+        impact: 0.7
+      },
+      statistics: {
+        confidence: 0.9,
+        support: 1.0,
+        totalOccurrences: history.length,
+        hitCount: Math.floor(history.length * 0.9)
+      }
+    });
+
+    // 规律2: 奇偶比例平衡
+    patterns.push({
+      patternId: "FLAT_PARITY_BALANCE",
+      patternType: "flat_parity_balance",
+      patternName: "平码奇偶比例平衡",
+      description: `平码奇偶比例趋于平衡，奇数平均占比${(avgParityRatio * 100).toFixed(1)}%`,
+      condition: { type: "always" },
+      result: {
+        oddRatio: avgParityRatio,
+        evenRatio: 1 - avgParityRatio,
+        type: "flat_parity_balance",
+        impact: 0.7
+      },
+      statistics: {
+        confidence: 0.9,
+        support: 1.0,
+        totalOccurrences: history.length,
+        hitCount: Math.floor(history.length * 0.9)
+      }
+    });
+
+    return patterns;
+  }
+}
+
+// ==============================================================================
+// 5.6 平码预测器 (Flat Code Predictor)
+// ==============================================================================
+
+class FlatCodePredictor {
+  /**
+   * 生成平码预测
+   */
+  static generateFlatPrediction(task, flatAnalysis, patterns = [], lastSpecialAttr = null) {
+    const history = task.history || [];
+
+    if (history.length === 0) {
+      return this.generateStaticFlatPrediction(task);
+    }
+
+    // 获取上一期数据
+    const lastRecord = history[0];
+    const lastCodes = lastRecord.open_code.split(",").map(c => parseInt(c));
+    const lastFlatCodes = lastCodes.slice(0, 6);
+    const lastSpecial = lastCodes[6];
+    const lastAttr = lastSpecialAttr || Formatter.getAttributes(lastSpecial);
+
+    // 分析上一期平码特征
+    const lastFlatAnalysis = this.analyzeLastFlat(lastFlatCodes);
+
+    // 应用规律
+    const patternImpacts = this.applyPatternsToFlatPrediction(flatAnalysis, patterns, lastAttr, lastFlatAnalysis);
+
+    // 生成预测
+    const flatZodiacPrediction = this.predictFlatZodiacs(flatAnalysis, lastAttr, patternImpacts);
+    const flatTailPrediction = this.predictFlatTails(flatAnalysis, lastSpecial, patternImpacts);
+    const distributionPrediction = this.predictDistribution(flatAnalysis);
+
+    // 计算置信度
+    const confidence = this.calculateFlatConfidence(flatAnalysis, patternImpacts);
+
+    return {
+      nextExpect: task.expect,
+      flatZodiac: flatZodiacPrediction,
+      flatTail: flatTailPrediction,
+      distribution: distributionPrediction,
+      patterns: patternImpacts.appliedPatterns,
+      confidence: confidence,
+      generatedAt: new Date().toISOString(),
+      algorithmVersion: "V5.0-Flat",
+      totalHistoryRecords: history.length
+    };
+  }
+
+  /**
+   * 分析上一期平码
+   */
+  static analyzeLastFlat(flatCodes) {
+    const analysis = {
+      zodiacs: new Set(),
+      tails: new Set(),
+      sizes: { small: 0, big: 0 },
+      parity: { odd: 0, even: 0 }
+    };
+
+    flatCodes.forEach(code => {
+      const zodiac = Formatter.getAttributes(code).zodiac;
+      const tail = code % 10;
+
+      analysis.zodiacs.add(zodiac);
+      analysis.tails.add(tail);
+
+      if (code <= 24) analysis.sizes.small++;
+      else analysis.sizes.big++;
+
+      if (code % 2 === 0) analysis.parity.even++;
+      else analysis.parity.odd++;
+    });
+
+    return analysis;
+  }
+
+  /**
+   * 应用规律到平码预测
+   */
+  static applyPatternsToFlatPrediction(flatAnalysis, patterns, lastAttr, lastFlatAnalysis) {
+    const impacts = {
+      zodiacImpacts: {},
+      tailImpacts: {},
+      distributionImpacts: {},
+      appliedPatterns: []
+    };
+
+    // 筛选适用的平码规律
+    const applicablePatterns = patterns.filter(pattern => {
+      // 检查是否启用
+      if (!pattern.application?.isActive) return false;
+
+      // 检查适用阶段
+      const applicablePhases = pattern.application?.applicablePhases || [];
+      if (!applicablePhases.includes('flat_prediction')) return false;
+
+      return true;
+    });
+
+    // 应用每个规律
+    applicablePatterns.forEach(pattern => {
+      const impact = this.applyPatternImpact(pattern, flatAnalysis, lastAttr, lastFlatAnalysis);
+
+      if (impact.applied) {
+        impacts.appliedPatterns.push({
+          patternId: pattern.patternId,
+          patternName: pattern.patternName,
+          description: pattern.description,
+          impactType: impact.type,
+          impactStrength: impact.strength,
+          confidence: pattern.statistics?.confidence || 0.5
+        });
+
+        // 根据规律类型应用影响
+        switch (impact.type) {
+          case 'zodiac_high':
+            impacts.zodiacImpacts[impact.zodiac] =
+              (impacts.zodiacImpacts[impact.zodiac] || 0) + impact.strength;
+            break;
+
+          case 'zodiac_combo':
+            impact.zodiacs?.forEach(zodiac => {
+              impacts.zodiacImpacts[zodiac] =
+                (impacts.zodiacImpacts[zodiac] || 0) + impact.strength * 0.3;
+            });
+            break;
+
+          case 'tail_combo':
+            impact.tails?.forEach(tail => {
+              impacts.tailImpacts[tail] =
+                (impacts.tailImpacts[tail] || 0) + impact.strength * 0.4;
+            });
+            break;
+
+          case 'size_balance':
+            impacts.distributionImpacts.sizeBalance = impact.strength;
+            break;
+
+          case 'parity_balance':
+            impacts.distributionImpacts.parityBalance = impact.strength;
+            break;
+        }
+      }
+    });
+
+    // 应用特码生肖回避规律
+    if (lastAttr && lastAttr.zodiac) {
+      // 特码生肖在平码中出现概率较低
+      impacts.zodiacImpacts[lastAttr.zodiac] =
+        (impacts.zodiacImpacts[lastAttr.zodiac] || 0) - 0.5;
+    }
+
+    // 应用尾数回避规律（上一期平码尾数）
+    if (lastFlatAnalysis && lastFlatAnalysis.tails) {
+      lastFlatAnalysis.tails.forEach(tail => {
+        // 上期出现过的尾数，本期可能减少
+        impacts.tailImpacts[tail] = (impacts.tailImpacts[tail] || 0) - 0.2;
+      });
+    }
+
+    return impacts;
+  }
+
+  /**
+   * 应用单个规律影响
+   */
+  static applyPatternImpact(pattern, flatAnalysis, lastAttr, lastFlatAnalysis) {
+    const patternType = pattern.patternType || '';
+
+    switch (patternType) {
+      case 'flat_zodiac_high':
+        // 高频生肖规律
+        return {
+          applied: true,
+          type: 'zodiac_high',
+          zodiac: pattern.result?.zodiac,
+          strength: pattern.result?.impact || 0.5
+        };
+
+      case 'flat_zodiac_combo':
+        // 生肖组合规律
+        return {
+          applied: true,
+          type: 'zodiac_combo',
+          zodiacs: pattern.result?.zodiacs,
+          strength: pattern.result?.impact || 0.4
+        };
+
+      case 'flat_tail_combo':
+        // 尾数组合规律
+        return {
+          applied: true,
+          type: 'tail_combo',
+          tails: pattern.result?.tails,
+          strength: pattern.result?.impact || 0.4
+        };
+
+      case 'flat_size_balance':
+        // 大小平衡规律
+        return {
+          applied: true,
+          type: 'size_balance',
+          strength: pattern.result?.impact || 0.7
+        };
+
+      case 'flat_parity_balance':
+        // 奇偶平衡规律
+        return {
+          applied: true,
+          type: 'parity_balance',
+          strength: pattern.result?.impact || 0.7
+        };
+
+      default:
+        return { applied: false };
+    }
+  }
+
+  /**
+   * 预测平码生肖
+   */
+  static predictFlatZodiacs(flatAnalysis, lastAttr, patternImpacts) {
+    const zodiacScores = {};
+
+    // 初始化所有生肖分数
+    Object.keys(CONFIG.ZODIAC_MAP).forEach(zodiac => {
+      zodiacScores[zodiac] = 0;
+    });
+
+    // 基于历史频率计算基础分数
+    if (flatAnalysis.zodiacStats && flatAnalysis.zodiacStats.periodFrequency) {
+      Object.entries(flatAnalysis.zodiacStats.periodFrequency).forEach(([zodiac, frequency]) => {
+        const periodRate = frequency / flatAnalysis.totalPeriods;
+        zodiacScores[zodiac] += periodRate * 100; // 转换为百分比分数
+      });
+    }
+
+    // 应用规律影响
+    Object.entries(patternImpacts.zodiacImpacts).forEach(([zodiac, impact]) => {
+      zodiacScores[zodiac] += impact * 30; // 影响权重调整
+    });
+
+    // 考虑特码生肖回避
+    if (lastAttr && lastAttr.zodiac) {
+      zodiacScores[lastAttr.zodiac] -= 50; // 显著降低特码生肖权重
+    }
+
+    // 排序生肖
+    const sortedZodiacs = Object.entries(zodiacScores)
+      .sort((a, b) => b[1] - a[1])
+      .map(entry => entry[0]);
+
+    // 选择主推生肖 (4-5个)
+    const mainZodiacs = sortedZodiacs.slice(0, 5);
+
+    // 选择防守生肖 (2-3个)
+    const guardZodiacs = sortedZodiacs.slice(5, 8);
+
+    // 回避生肖 (特码生肖)
+    const avoidZodiacs = lastAttr ? [lastAttr.zodiac] : [];
+
+    return {
+      main: mainZodiacs,
+      guard: guardZodiacs,
+      avoid: avoidZodiacs,
+      scores: zodiacScores
+    };
+  }
+
+  /**
+   * 预测平码尾数
+   */
+  static predictFlatTails(flatAnalysis, lastSpecial, patternImpacts) {
+    const tailScores = {};
+
+    // 初始化所有尾数分数
+    for (let i = 0; i < 10; i++) {
+      tailScores[i] = 0;
+    }
+
+    // 基于历史频率计算基础分数
+    if (flatAnalysis.tailStats && flatAnalysis.tailStats.periodFrequency) {
+      Object.entries(flatAnalysis.tailStats.periodFrequency).forEach(([tail, frequency]) => {
+        const periodRate = frequency / flatAnalysis.totalPeriods;
+        tailScores[parseInt(tail)] += periodRate * 100;
+      });
+    }
+
+    // 应用规律影响
+    Object.entries(patternImpacts.tailImpacts).forEach(([tail, impact]) => {
+      tailScores[parseInt(tail)] += impact * 30;
+    });
+
+    // 考虑特码尾数影响
+    if (lastSpecial !== null) {
+      const specialTail = lastSpecial % 10;
+      tailScores[specialTail] += 10; // 特码尾数在平码中有一定出现概率
+    }
+
+    // 排序尾数
+    const sortedTails = Object.entries(tailScores)
+      .sort((a, b) => b[1] - a[1])
+      .map(entry => parseInt(entry[0]));
+
+    // 必出尾数 (分数最高的1-2个)
+    const mustHaveTails = sortedTails.slice(0, 2);
+
+    // 高概率尾数 (接下来的3-4个)
+    const highProbTails = sortedTails.slice(2, 6);
+
+    // 尾数组合建议
+    const tailCombinations = this.generateTailCombinations(mustHaveTails, highProbTails);
+
+    return {
+      mustHave: mustHaveTails,
+      highProb: highProbTails,
+      possible: sortedTails.slice(6, 9),
+      scores: tailScores,
+      combinations: tailCombinations
+    };
+  }
+
+  /**
+   * 生成尾数组合建议
+   */
+  static generateTailCombinations(mustHaveTails, highProbTails) {
+    const combinations = [];
+
+    // 组合1: 必出尾数 + 高概率尾数
+    if (mustHaveTails.length > 0 && highProbTails.length > 0) {
+      const combo = [...mustHaveTails, ...highProbTails.slice(0, 2)].sort((a, b) => a - b);
+      combinations.push(`核心: ${combo.join(",")}`);
+    }
+
+    // 组合2: 全部高概率尾数
+    if (highProbTails.length >= 4) {
+      const combo = highProbTails.slice(0, 4).sort((a, b) => a - b);
+      combinations.push(`集中: ${combo.join(",")}`);
+    }
+
+    // 组合3: 分散组合
+    const allTails = [...mustHaveTails, ...highProbTails];
+    if (allTails.length >= 4) {
+      // 选择奇偶平衡的组合
+      const oddTails = allTails.filter(t => t % 2 !== 0);
+      const evenTails = allTails.filter(t => t % 2 === 0);
+
+      if (oddTails.length >= 2 && evenTails.length >= 2) {
+        const combo = [
+          oddTails[0], oddTails[1],
+          evenTails[0], evenTails[1]
+        ].sort((a, b) => a - b);
+        combinations.push(`平衡: ${combo.join(",")}`);
+      }
+    }
+
+    return combinations;
+  }
+
+  /**
+   * 预测分布特征
+   */
+  static predictDistribution(flatAnalysis) {
+    if (!flatAnalysis.sizeStats || !flatAnalysis.parityStats) {
+      return {
+        zodiacCount: "5-6个",
+        tailCount: "4-6个",
+        bigSmallRatio: "约3:3",
+        oddEvenRatio: "约3:3"
+      };
+    }
+
+    const zodiacCount = `${Math.floor(flatAnalysis.avgZodiacsPerPeriod)}-${Math.ceil(flatAnalysis.avgZodiacsPerPeriod)}个`;
+    const tailCount = `${Math.floor(flatAnalysis.avgTailsPerPeriod)}-${Math.ceil(flatAnalysis.avgTailsPerPeriod)}个`;
+
+    const smallPerPeriod = Math.round(flatAnalysis.sizeStats.avgSmallPerPeriod);
+    const bigPerPeriod = Math.round(flatAnalysis.sizeStats.avgBigPerPeriod);
+    const bigSmallRatio = `${smallPerPeriod}:${bigPerPeriod}`;
+
+    const oddPerPeriod = Math.round(flatAnalysis.parityStats.avgOddPerPeriod);
+    const evenPerPeriod = Math.round(flatAnalysis.parityStats.avgEvenPerPeriod);
+    const oddEvenRatio = `${oddPerPeriod}:${evenPerPeriod}`;
+
+    return {
+      zodiacCount,
+      tailCount,
+      bigSmallRatio,
+      oddEvenRatio,
+      specialInFlatRate: flatAnalysis.specialInFlatRate.toFixed(2)
+    };
+  }
+
+  /**
+   * 计算平码预测置信度
+   */
+  static calculateFlatConfidence(flatAnalysis, patternImpacts) {
+    let confidence = 50; // 基础置信度
+
+    // 基于数据量
+    confidence += Math.min(20, flatAnalysis.totalPeriods / 10);
+
+    // 基于规律应用
+    const patternConfidence = patternImpacts.appliedPatterns.reduce((sum, pattern) => {
+      return sum + (pattern.confidence * 10);
+    }, 0);
+
+    confidence += Math.min(20, patternConfidence);
+
+    // 基于历史数据稳定性
+    if (flatAnalysis.totalPeriods >= 50) {
+      confidence += 10;
+    }
+
+    // 限制范围
+    return Math.max(30, Math.min(95, Math.round(confidence)));
+  }
+
+  /**
+   * 静态兜底预测
+   */
+  static generateStaticFlatPrediction(task) {
+    const date = new Date();
+    const day = date.getDate();
+
+    // 基于日期选择生肖
+    const allZodiacs = Object.keys(CONFIG.ZODIAC_MAP);
+    const zodiacIndex = day % allZodiacs.length;
+
+    // 选择5个主要生肖
+    const mainZodiacs = [];
+    for (let i = 0; i < 5; i++) {
+      mainZodiacs.push(allZodiacs[(zodiacIndex + i * 3) % allZodiacs.length]);
+    }
+
+    // 选择尾数
+    const mustHaveTails = [day % 10, (day + 3) % 10];
+    const highProbTails = [(day + 1) % 10, (day + 5) % 10, (day + 7) % 10];
+
+    return {
+      nextExpect: task.expect,
+      flatZodiac: {
+        main: mainZodiacs,
+        guard: [allZodiacs[(zodiacIndex + 2) % allZodiacs.length], allZodiacs[(zodiacIndex + 4) % allZodiacs.length]],
+        avoid: [],
+        scores: {}
+      },
+      flatTail: {
+        mustHave: mustHaveTails,
+        highProb: highProbTails,
+        possible: [(day + 2) % 10, (day + 6) % 10],
+        scores: {},
+        combinations: [`${mustHaveTails.join(",")}`, `${highProbTails.slice(0, 3).join(",")}`]
+      },
+      distribution: {
+        zodiacCount: "5-6个",
+        tailCount: "4-6个",
+        bigSmallRatio: "3:3",
+        oddEvenRatio: "3:3"
+      },
+      patterns: [],
+      confidence: 20,
+      generatedAt: new Date().toISOString(),
+      algorithmVersion: "V5.0-Flat-Static",
+      totalHistoryRecords: 0
+    };
+  }
+}
+
+// ==============================================================================
+// 5.7 规律发现引擎 (Pattern Discovery Engine)
+// ==============================================================================
+
+class PatternDiscoveryEngine {
+  constructor() {
+    this.minConfidence = 0.55;  // 最小置信度
+    this.minSupport = 0.03;     // 最小支持度
+    this.maxPatterns = 200;     // 最大规律数量
+  }
+
+  /**
+   * 从历史数据中发现所有规律
+   */
+  async discoverAllPatterns(history, options = {}) {
+    Logger.info("PatternDiscovery", `开始发现规律，历史数据: ${history.length} 期`);
+
+    const patterns = [];
+
+    // 1. 发现生肖规律
+    Logger.info("PatternDiscovery", "发现生肖规律...");
+    const zodiacPatterns = this.discoverZodiacPatterns(history, options);
+    patterns.push(...zodiacPatterns);
+
+    // 2. 发现尾数规律
+    Logger.info("PatternDiscovery", "发现尾数规律...");
+    const tailPatterns = this.discoverTailPatterns(history, options);
+    patterns.push(...tailPatterns);
+
+    // 3. 发现波色规律
+    Logger.info("PatternDiscovery", "发现波色规律...");
+    const colorPatterns = this.discoverColorPatterns(history, options);
+    patterns.push(...colorPatterns);
+
+    // 4. 发现平码规律
+    Logger.info("PatternDiscovery", "发现平码规律...");
+    const flatPatterns = FlatCodeAnalyzer.discoverFlatPatterns(history);
+    patterns.push(...flatPatterns);
+
+    // 5. 发现复合规律
+    Logger.info("PatternDiscovery", "发现复合规律...");
+    const complexPatterns = this.discoverComplexPatterns(history, options);
+    patterns.push(...complexPatterns);
+
+    // 6. 验证规律
+    Logger.info("PatternDiscovery", "验证规律...");
+    const validatedPatterns = await this.validatePatterns(patterns, history, options);
+
+    // 7. 限制数量并排序
+    const finalPatterns = validatedPatterns
+      .sort((a, b) => {
+        // 按置信度降序，支持度降序
+        const confDiff = (b.statistics.confidence || 0) - (a.statistics.confidence || 0);
+        if (Math.abs(confDiff) > 0.01) return confDiff;
+        return (b.statistics.support || 0) - (a.statistics.support || 0);
+      })
+      .slice(0, this.maxPatterns);
+
+    Logger.info("PatternDiscovery", `发现 ${finalPatterns.length} 条有效规律`);
+    return finalPatterns;
+  }
+
+  /**
+   * 发现生肖规律
+   */
+  discoverZodiacPatterns(history, options) {
+    const patterns = [];
+    const minConfidence = options.minConfidence || this.minConfidence;
+    const minSupport = options.minSupport || this.minSupport;
+
+    // 1. 直接转移规律 A→B
+    const directTransitions = {};
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+      const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+      const key = `${prevZodiac}_${currZodiac}`;
+      if (!directTransitions[key]) {
+        directTransitions[key] = { count: 0, total: 0 };
+      }
+      directTransitions[key].count++;
+    }
+
+    // 计算每个生肖的总转移次数
+    const zodiacTotalTransitions = {};
+    Object.keys(directTransitions).forEach(key => {
+      const [prevZodiac] = key.split('_');
+      zodiacTotalTransitions[prevZodiac] = (zodiacTotalTransitions[prevZodiac] || 0) + directTransitions[key].count;
+    });
+
+    // 生成直接转移规律
+    Object.entries(directTransitions).forEach(([key, stats]) => {
+      const [prevZodiac, currZodiac] = key.split('_');
+      const totalForPrev = zodiacTotalTransitions[prevZodiac] || 1;
+      const confidence = stats.count / totalForPrev;
+      const support = stats.count / history.length;
+
+      if (confidence >= minConfidence && support >= minSupport) {
+        patterns.push({
+          patternId: `ZODIAC_DIRECT_${key}`,
+          patternType: "zodiac_direct",
+          patternName: `${prevZodiac}→${currZodiac}转移`,
+          description: `上期开${prevZodiac}，本期开${currZodiac}的概率较高`,
+          condition: {
+            type: "previous_zodiac",
+            zodiac: prevZodiac
+          },
+          result: {
+            type: "current_zodiac",
+            zodiac: currZodiac,
+            impact: 0.7
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: totalForPrev,
+            hitCount: stats.count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 1.0,
+            priority: Math.round(confidence * 10),
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    // 2. 隔期转移规律 A→?→B
+    const skipTransitions = {};
+
+    for (let i = 0; i < history.length - 2; i++) {
+      const prevRecord = history[i + 2];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+      const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+      const key = `${prevZodiac}_SKIP_${currZodiac}`;
+      if (!skipTransitions[key]) {
+        skipTransitions[key] = { count: 0, total: 0 };
+      }
+      skipTransitions[key].count++;
+    }
+
+    // 计算隔期规律
+    Object.entries(skipTransitions).forEach(([key, stats]) => {
+      const [prevZodiac, , currZodiac] = key.split('_');
+      const totalForPrev = zodiacTotalTransitions[prevZodiac] || 1;
+      const confidence = stats.count / totalForPrev;
+      const support = stats.count / history.length;
+
+      if (confidence >= minConfidence * 0.9 && support >= minSupport * 0.8) {
+        patterns.push({
+          patternId: `ZODIAC_SKIP_${prevZodiac}_${currZodiac}`,
+          patternType: "zodiac_skip",
+          patternName: `${prevZodiac}→隔期→${currZodiac}`,
+          description: `上上期开${prevZodiac}，本期开${currZodiac}的概率较高`,
+          condition: {
+            type: "skip_zodiac",
+            zodiac: prevZodiac,
+            skip: 1
+          },
+          result: {
+            type: "current_zodiac",
+            zodiac: currZodiac,
+            impact: 0.6
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: totalForPrev,
+            hitCount: stats.count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 0.8,
+            priority: Math.round(confidence * 8),
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    // 3. 生肖关系规律
+    patterns.push(...this.discoverZodiacRelationPatterns(history, minConfidence, minSupport));
+
+    return patterns;
+  }
+
+  /**
+   * 发现生肖关系规律
+   */
+  discoverZodiacRelationPatterns(history, minConfidence, minSupport) {
+    const patterns = [];
+
+    // 1. 六合关系规律
+    const liuHeStats = {};
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+      const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+      // 检查是否是六合关系
+      if (CONFIG.RELATIONS.LIU_HE[prevZodiac] === currZodiac) {
+        const key = `LIU_HE_${prevZodiac}_${currZodiac}`;
+        liuHeStats[key] = (liuHeStats[key] || 0) + 1;
+      }
+    }
+
+    // 生成六合关系规律
+    Object.entries(liuHeStats).forEach(([key, count]) => {
+      const [, prevZodiac, currZodiac] = key.split('_');
+      const confidence = count / history.length * 2; // 六合关系理论上概率更高
+      const support = count / history.length;
+
+      if (confidence >= minConfidence && support >= minSupport) {
+        patterns.push({
+          patternId: key,
+          patternType: "zodiac_liuhe",
+          patternName: `${prevZodiac}-${currZodiac}六合关系`,
+          description: `六合关系 ${prevZodiac}-${currZodiac} 出现频率较高`,
+          condition: {
+            type: "liuhe_relation",
+            zodiac: prevZodiac
+          },
+          result: {
+            type: "current_zodiac",
+            zodiac: currZodiac,
+            impact: 0.8
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: history.length,
+            hitCount: count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 1.2,
+            priority: 8,
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    // 2. 三合关系规律
+    const sanHeStats = {};
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+      const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+      // 检查是否是三合关系
+      if (CONFIG.RELATIONS.SAN_HE[prevZodiac]?.includes(currZodiac)) {
+        const key = `SAN_HE_${prevZodiac}_${currZodiac}`;
+        sanHeStats[key] = (sanHeStats[key] || 0) + 1;
+      }
+    }
+
+    // 生成三合关系规律
+    Object.entries(sanHeStats).forEach(([key, count]) => {
+      const [, prevZodiac, currZodiac] = key.split('_');
+      const confidence = count / history.length * 1.5;
+      const support = count / history.length;
+
+      if (confidence >= minConfidence && support >= minSupport) {
+        patterns.push({
+          patternId: key,
+          patternType: "zodiac_sanhe",
+          patternName: `${prevZodiac}-${currZodiac}三合关系`,
+          description: `三合关系 ${prevZodiac}-${currZodiac} 出现频率较高`,
+          condition: {
+            type: "sanhe_relation",
+            zodiac: prevZodiac
+          },
+          result: {
+            type: "current_zodiac",
+            zodiac: currZodiac,
+            impact: 0.7
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: history.length,
+            hitCount: count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 1.0,
+            priority: 7,
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    return patterns;
+  }
+
+  /**
+   * 发现尾数规律
+   */
+  discoverTailPatterns(history, options) {
+    const patterns = [];
+    const minConfidence = options.minConfidence || this.minConfidence;
+    const minSupport = options.minSupport || this.minSupport;
+
+    // 1. 尾数转移规律
+    const tailTransitions = {};
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevTail = prevSpecial % 10;
+      const currTail = currSpecial % 10;
+
+      const key = `TAIL_${prevTail}_${currTail}`;
+      if (!tailTransitions[key]) {
+        tailTransitions[key] = { count: 0, total: 0 };
+      }
+      tailTransitions[key].count++;
+    }
+
+    // 计算每个尾数的总转移次数
+    const tailTotalTransitions = {};
+    Object.keys(tailTransitions).forEach(key => {
+      const [, prevTail] = key.split('_');
+      tailTotalTransitions[prevTail] = (tailTotalTransitions[prevTail] || 0) + tailTransitions[key].count;
+    });
+
+    // 生成尾数转移规律
+    Object.entries(tailTransitions).forEach(([key, stats]) => {
+      const [, prevTail, currTail] = key.split('_');
+      const totalForPrev = tailTotalTransitions[prevTail] || 1;
+      const confidence = stats.count / totalForPrev;
+      const support = stats.count / history.length;
+
+      if (confidence >= minConfidence && support >= minSupport) {
+        patterns.push({
+          patternId: key,
+          patternType: "tail_direct",
+          patternName: `${prevTail}尾→${currTail}尾`,
+          description: `上期开${prevTail}尾，本期开${currTail}尾的概率较高`,
+          condition: {
+            type: "previous_tail",
+            tail: parseInt(prevTail)
+          },
+          result: {
+            type: "current_tail",
+            tail: parseInt(currTail),
+            impact: 0.6
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: totalForPrev,
+            hitCount: stats.count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 0.9,
+            priority: Math.round(confidence * 8),
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    // 2. 尾数冷热规律
+    const tailFrequency = {};
+    for (let i = 0; i < 10; i++) tailFrequency[i] = 0;
+
+    history.forEach(record => {
+      const special = parseInt(record.open_code.split(",")[6]);
+      const tail = special % 10;
+      tailFrequency[tail]++;
+    });
+
+    // 计算每个尾数的理论概率和实际概率
+    const total = history.length;
+    const expectedRate = 0.1; // 每个尾数理论概率10%
+
+    Object.entries(tailFrequency).forEach(([tail, count]) => {
+      const actualRate = count / total;
+      const deviation = actualRate - expectedRate;
+
+      // 如果偏差超过阈值，创建规律
+      if (Math.abs(deviation) > 0.05 && count >= 5) {
+        const patternType = deviation > 0 ? "tail_hot" : "tail_cold";
+        const impact = Math.abs(deviation) * 5;
+
+        patterns.push({
+          patternId: `TAIL_${patternType.toUpperCase()}_${tail}`,
+          patternType: `tail_${patternType}`,
+          patternName: `${tail}尾${deviation > 0 ? '热' : '冷'}号`,
+          description: `${tail}尾${deviation > 0 ? '出现频率高于理论值' : '出现频率低于理论值'}`,
+          condition: {
+            type: "tail_trend",
+            tail: parseInt(tail),
+            trend: deviation > 0 ? "hot" : "cold"
+          },
+          result: {
+            type: "tail_regression",
+            tail: parseInt(tail),
+            impact: impact,
+            deviation: deviation
+          },
+          statistics: {
+            confidence: Math.abs(deviation) * 3 + 0.3,
+            support: count / total,
+            totalOccurrences: total,
+            hitCount: count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 0.8,
+            priority: 6,
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    return patterns;
+  }
+
+  /**
+   * 发现波色规律
+   */
+  discoverColorPatterns(history, options) {
+    const patterns = [];
+    const minConfidence = options.minConfidence || this.minConfidence;
+    const minSupport = options.minSupport || this.minSupport;
+
+    // 1. 波色转移规律
+    const colorTransitions = {};
+    const colorStats = { red: 0, blue: 0, green: 0 };
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevColor = Formatter.getAttributes(prevSpecial).color;
+      const currColor = Formatter.getAttributes(currSpecial).color;
+
+      colorStats[prevColor]++;
+
+      const key = `COLOR_${prevColor}_${currColor}`;
+      if (!colorTransitions[key]) {
+        colorTransitions[key] = 0;
+      }
+      colorTransitions[key]++;
+    }
+
+    // 生成波色转移规律
+    Object.entries(colorTransitions).forEach(([key, count]) => {
+      const [, prevColor, currColor] = key.split('_');
+      const totalForPrev = colorStats[prevColor] || 1;
+      const confidence = count / totalForPrev;
+      const support = count / history.length;
+
+      if (confidence >= minConfidence && support >= minSupport) {
+        patterns.push({
+          patternId: key,
+          patternType: "color_direct",
+          patternName: `${prevColor}波→${currColor}波`,
+          description: `上期开${prevColor}波，本期开${currColor}波的概率较高`,
+          condition: {
+            type: "previous_color",
+            color: prevColor
+          },
+          result: {
+            type: "current_color",
+            color: currColor,
+            impact: 0.7
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: totalForPrev,
+            hitCount: count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 1.0,
+            priority: Math.round(confidence * 8),
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    // 2. 波色连续规律
+    const colorStreaks = this.analyzeColorStreaks(history);
+
+    colorStreaks.forEach(streak => {
+      if (streak.confidence >= minConfidence && streak.support >= minSupport) {
+        patterns.push({
+          patternId: `COLOR_STREAK_${streak.color}_${streak.length}`,
+          patternType: "color_streak",
+          patternName: `${streak.color}波连开${streak.length}期`,
+          description: `${streak.color}波连续开${streak.length}期后，下一期变化概率较高`,
+          condition: {
+            type: "color_streak",
+            color: streak.color,
+            length: streak.length
+          },
+          result: {
+            type: "color_break",
+            color: streak.breakColor,
+            impact: 0.6
+          },
+          statistics: {
+            confidence: streak.confidence,
+            support: streak.support,
+            totalOccurrences: streak.total,
+            hitCount: streak.hits,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 0.9,
+            priority: 7,
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    return patterns;
+  }
+
+  /**
+   * 分析波色连续情况
+   */
+  analyzeColorStreaks(history) {
+    const streaks = [];
+    const colorCounts = { red: 0, blue: 0, green: 0 };
+
+    let currentColor = null;
+    let currentStreak = 0;
+
+    for (let i = history.length - 1; i >= 0; i--) {
+      const special = parseInt(history[i].open_code.split(",")[6]);
+      const color = Formatter.getAttributes(special).color;
+
+      if (color === currentColor) {
+        currentStreak++;
+      } else {
+        // 记录上一个连开
+        if (currentColor && currentStreak >= 2) {
+          // 检查下一期是否变化
+          if (i < history.length - 1) {
+            const nextRecord = history[i + 1];
+            const nextSpecial = parseInt(nextRecord.open_code.split(",")[6]);
+            const nextColor = Formatter.getAttributes(nextSpecial).color;
+
+            const key = `${currentColor}_${currentStreak}`;
+            if (!streaks[key]) {
+              streaks[key] = {
+                color: currentColor,
+                length: currentStreak,
+                total: 0,
+                hits: 0,
+                breakColor: null
+              };
+            }
+
+            streaks[key].total++;
+            if (nextColor !== currentColor) {
+              streaks[key].hits++;
+              streaks[key].breakColor = nextColor;
+            }
+          }
+        }
+
+        currentColor = color;
+        currentStreak = 1;
+      }
+
+      colorCounts[color]++;
+    }
+
+    // 转换为数组并计算置信度
+    return Object.values(streaks).map(streak => {
+      streak.confidence = streak.hits / streak.total;
+      streak.support = streak.total / history.length;
+      return streak;
+    });
+  }
+
+  /**
+   * 发现复合规律
+   */
+  discoverComplexPatterns(history, options) {
+    const patterns = [];
+
+    // 1. 生肖+波色组合规律
+    const zodiacColorCombos = {};
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const prevRecord = history[i + 1];
+      const currRecord = history[i];
+
+      const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+      const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+      const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+      const prevColor = Formatter.getAttributes(prevSpecial).color;
+      const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+      const key = `${prevZodiac}_${prevColor}_${currZodiac}`;
+      zodiacColorCombos[key] = (zodiacColorCombos[key] || 0) + 1;
+    }
+
+    // 计算置信度
+    const zodiacColorTotals = {};
+    Object.keys(zodiacColorCombos).forEach(key => {
+      const [zodiac, color] = key.split('_');
+      const totalKey = `${zodiac}_${color}`;
+      zodiacColorTotals[totalKey] = (zodiacColorTotals[totalKey] || 0) + zodiacColorCombos[key];
+    });
+
+    // 生成复合规律
+    Object.entries(zodiacColorCombos).forEach(([key, count]) => {
+      const [prevZodiac, prevColor, currZodiac] = key.split('_');
+      const totalKey = `${prevZodiac}_${prevColor}`;
+      const total = zodiacColorTotals[totalKey] || 1;
+      const confidence = count / total;
+      const support = count / history.length;
+
+      if (confidence >= this.minConfidence && support >= this.minSupport && count >= 3) {
+        patterns.push({
+          patternId: `COMPLEX_${key}`,
+          patternType: "complex_zodiac_color",
+          patternName: `${prevZodiac}+${prevColor}波→${currZodiac}`,
+          description: `上期${prevZodiac}生肖且${prevColor}波，本期开${currZodiac}的概率较高`,
+          condition: {
+            type: "complex_previous",
+            zodiac: prevZodiac,
+            color: prevColor
+          },
+          result: {
+            type: "current_zodiac",
+            zodiac: currZodiac,
+            impact: 0.8
+          },
+          statistics: {
+            confidence: confidence,
+            support: support,
+            totalOccurrences: total,
+            hitCount: count,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString()
+          },
+          application: {
+            isActive: true,
+            weight: 1.1,
+            priority: Math.round(confidence * 9),
+            applicablePhases: ['prediction', 'backtest']
+          }
+        });
+      }
+    });
+
+    // 2. 平码尾数与特码关联规律
+    const flatTailSpecialPatterns = this.discoverFlatTailSpecialPatterns(history);
+    patterns.push(...flatTailSpecialPatterns);
+
+    return patterns;
+  }
+
+  /**
+   * 发现平码尾数与特码关联规律
+   */
+  discoverFlatTailSpecialPatterns(history) {
+    const patterns = [];
+    const tailStats = {};
+
+    // 统计平码尾数与特码尾数的关系
+    for (let i = 0; i < history.length; i++) {
+      const record = history[i];
+      const codes = record.open_code.split(",").map(c => parseInt(c));
+      const flatCodes = codes.slice(0, 6);
+      const special = codes[6];
+      const specialTail = special % 10;
+
+      // 统计平码尾数
+      const flatTails = new Set();
+      flatCodes.forEach(code => {
+        flatTails.add(code % 10);
+      });
+
+      // 检查特码尾数是否在平码尾数中
+      const key = Array.from(flatTails).sort((a, b) => a - b).join(",");
+      if (!tailStats[key]) {
+        tailStats[key] = { total: 0, hits: 0, specialTails: {} };
+      }
+
+      tailStats[key].total++;
+      if (flatTails.has(specialTail)) {
+        tailStats[key].hits++;
+        tailStats[key].specialTails[specialTail] = (tailStats[key].specialTails[specialTail] || 0) + 1;
+      }
+    }
+
+    // 生成规律
+    Object.entries(tailStats).forEach(([flatTailCombo, stats]) => {
+      if (stats.total >= 10) { // 至少出现10次
+        const confidence = stats.hits / stats.total;
+        const support = stats.total / history.length;
+
+        if (confidence >= 0.4 && support >= 0.05) {
+          // 找出最常见的特码尾数
+          let mostCommonSpecialTail = null;
+          let maxCount = 0;
+          Object.entries(stats.specialTails).forEach(([tail, count]) => {
+            if (count > maxCount) {
+              maxCount = count;
+              mostCommonSpecialTail = parseInt(tail);
+            }
+          });
+
+          if (mostCommonSpecialTail !== null) {
+            const tailConfidence = maxCount / stats.hits;
+
+            patterns.push({
+              patternId: `FLAT_TAIL_SPECIAL_${flatTailCombo.replace(/,/g, "_")}_${mostCommonSpecialTail}`,
+              patternType: "flat_tail_special",
+              patternName: `平码尾数${flatTailCombo}→特码${mostCommonSpecialTail}尾`,
+              description: `当平码尾数为${flatTailCombo}时，特码尾数为${mostCommonSpecialTail}的概率较高`,
+              condition: {
+                type: "flat_tails",
+                tails: flatTailCombo.split(",").map(t => parseInt(t))
+              },
+              result: {
+                type: "special_tail",
+                tail: mostCommonSpecialTail,
+                impact: 0.5
+              },
+              statistics: {
+                confidence: confidence * tailConfidence,
+                support: support,
+                totalOccurrences: stats.total,
+                hitCount: maxCount,
+                firstSeen: new Date().toISOString(),
+                lastSeen: new Date().toISOString()
+              },
+              application: {
+                isActive: true,
+                weight: 0.7,
+                priority: Math.round(confidence * tailConfidence * 7),
+                applicablePhases: ['prediction', 'backtest', 'flat_prediction']
+              }
+            });
+          }
+        }
+      }
+    });
+
+    return patterns;
+  }
+
+  /**
+   * 验证规律
+   */
+  async validatePatterns(patterns, history, options) {
+    const validatedPatterns = [];
+    const testSize = Math.min(20, Math.floor(history.length * 0.2)); // 用20期或20%的数据测试
+
+    for (const pattern of patterns) {
+      try {
+        // 简单的验证：检查规律在最近的数据中是否依然有效
+        const recentHistory = history.slice(0, testSize);
+        const testResult = this.testPattern(pattern, recentHistory);
+
+        if (testResult.valid) {
+          // 更新近期表现
+          pattern.statistics.recentPerformance = testResult.performance;
+          pattern.statistics.stability = this.calculateStability(pattern, testResult);
+
+          validatedPatterns.push(pattern);
+        }
+      } catch (e) {
+        Logger.error("PatternDiscovery", `验证规律失败: ${pattern.patternId}`, e);
+      }
+    }
+
+    return validatedPatterns;
+  }
+
+  /**
+   * 测试单个规律
+   */
+  testPattern(pattern, testHistory) {
+    let hits = 0;
+    let occurrences = 0;
+
+    // 根据规律类型进行测试
+    switch (pattern.patternType) {
+      case 'zodiac_direct':
+        // 测试生肖转移规律
+        for (let i = 0; i < testHistory.length - 1; i++) {
+          const prevRecord = testHistory[i + 1];
+          const currRecord = testHistory[i];
+
+          const prevSpecial = parseInt(prevRecord.open_code.split(",")[6]);
+          const currSpecial = parseInt(currRecord.open_code.split(",")[6]);
+
+          const prevZodiac = Formatter.getAttributes(prevSpecial).zodiac;
+          const currZodiac = Formatter.getAttributes(currSpecial).zodiac;
+
+          if (prevZodiac === pattern.condition.zodiac) {
+            occurrences++;
+            if (currZodiac === pattern.result.zodiac) {
+              hits++;
+            }
+          }
+        }
+        break;
+
+      // 其他规律类型的测试...
+    }
+
+    const performance = occurrences > 0 ? hits / occurrences : 0;
+    const valid = occurrences >= 3 && performance >= pattern.statistics.confidence * 0.7;
+
+    return {
+      valid,
+      performance,
+      hits,
+      occurrences
+    };
+  }
+
+  /**
+   * 计算规律稳定性
+   */
+  calculateStability(pattern, testResult) {
+    const historicalConfidence = pattern.statistics.confidence || 0;
+    const recentPerformance = testResult.performance || 0;
+
+    // 稳定性 = 1 - |历史置信度 - 近期表现|
+    const stability = 1 - Math.abs(historicalConfidence - recentPerformance);
+    return Math.max(0, Math.min(1, stability));
+  }
+}
+
+// ==============================================================================
+// 6.5 批量复盘系统 (Batch Backtest System)
+// ==============================================================================
+
+class BatchBacktestSystem {
+  /**
+   * 执行批量复盘
+   */
+  static async executeBatchBacktest(env, task, ctx) {
+    const { rangeStart, rangeEnd, taskId } = task;
+
+    Logger.info("BatchBacktest", `开始批量复盘: ${rangeStart} - ${rangeEnd}, 任务ID: ${taskId}`);
+
+    try {
+      // 1. 获取历史数据
+      const allHistory = await DB.getHistory(env);
+      if (allHistory.length === 0) {
+        throw new Error("历史数据为空");
+      }
+
+      // 2. 查找期号范围
+      const startIndex = allHistory.findIndex(h => h.expect === rangeStart);
+      const endIndex = allHistory.findIndex(h => h.expect === rangeEnd);
+
+      if (startIndex === -1 || endIndex === -1) {
+        throw new Error("指定的期号范围不存在");
+      }
+
+      if (startIndex < endIndex) {
+        throw new Error("起始期号必须晚于结束期号");
+      }
+
+      const totalPeriods = startIndex - endIndex + 1;
+      if (totalPeriods > 500) {
+        throw new Error("批量复盘最多支持500期");
+      }
+
+      // 3. 获取当前算法权重
+      const weights = await DB.getWeights(env);
+
+      // 4. 获取当前规律库
+      const allPatterns = await DB.getAllPatterns(env, true);
+
+      // 5. 逐期复盘
+      const results = [];
+      const patternPerformance = new Map();
+
+      for (let i = startIndex; i >= endIndex; i--) {
+        const currentIndex = startIndex - i;
+        const progress = (currentIndex + 1) / totalPeriods;
+
+        try {
+          // 更新进度
+          if (currentIndex % 10 === 0 || i === endIndex) {
+            await DB.updateBatchTaskProgress(env, taskId, progress, results);
+            Logger.info("BatchBacktest", `进度更新: ${(progress * 100).toFixed(1)}%`);
+          }
+
+          // 执行单期复盘
+          const result = await this.singleBacktest(
+            env,
+            allHistory,
+            i,
+            weights,
+            allPatterns,
+            patternPerformance
+          );
+
+          results.push(result);
+
+        } catch (error) {
+          Logger.error("BatchBacktest", `复盘第 ${allHistory[i].expect} 期失败`, error);
+          results.push({
+            expect: allHistory[i].expect,
+            error: error.message,
+            success: false
+          });
+        }
+      }
+
+      // 6. 生成总结报告
+      const summary = await this.generateSummary(
+        results,
+        allHistory,
+        startIndex,
+        endIndex,
+        patternPerformance,
+        weights
+      );
+
+      // 7. 完成任务
+      await DB.completeBatchTask(env, taskId, results, summary);
+
+      Logger.info("BatchBacktest", `批量复盘完成: ${taskId}, 总期数: ${totalPeriods}`);
+
+      return {
+        success: true,
+        taskId,
+        totalPeriods,
+        results,
+        summary
+      };
+
+    } catch (error) {
+      Logger.error("BatchBacktest", `批量复盘失败: ${taskId}`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 单期复盘
+   */
+  static async singleBacktest(env, allHistory, index, weights, allPatterns, patternPerformance) {
+    const targetExpect = allHistory[index].expect;
+    const targetRecord = allHistory[index];
+
+    Logger.debug("BatchBacktest", `复盘第 ${targetExpect} 期`);
+
+    // 1. 准备历史数据（截止到目标期之前）
+    const historyUpToTarget = allHistory.slice(index + 1);
+
+    if (historyUpToTarget.length < 10) {
+      return {
+        expect: targetExpect,
+        success: false,
+        error: "历史数据不足",
+        skipped: true
+      };
+    }
+
+    // 2. 创建模拟任务
+    const mockTask = {
+      expect: targetExpect,
+      history: historyUpToTarget,
+      startTime: Date.now(),
+      unlockTime: Date.now(),
+      status: "DONE"
+    };
+
+    // 3. 执行预测
+    const historicalAnalysis = MathEngine.analyzeBasicStats(historyUpToTarget);
+    const determinants = MathEngine.analyzeDeterminants(historyUpToTarget);
+
+    // 特码预测
+    const specialPrediction = PredictionEngine.generate(
+      mockTask,
+      historicalAnalysis,
+      weights,
+      determinants
+    );
+
+    // 平码预测
+    const flatAnalysis = FlatCodeAnalyzer.analyzeFlatHistory(historyUpToTarget);
+    const lastSpecial = parseInt(historyUpToTarget[0]?.open_code.split(",")[6] || "0");
+    const lastAttr = Formatter.getAttributes(lastSpecial);
+
+    const flatPrediction = FlatCodePredictor.generateFlatPrediction(
+      mockTask,
+      flatAnalysis,
+      allPatterns.filter(p => p.application?.applicablePhases?.includes('flat_prediction')),
+      lastAttr
+    );
+
+    // 4. 验证结果
+    const actualCodes = targetRecord.open_code.split(",").map(c => parseInt(c));
+    const actualSpecial = actualCodes[6];
+    const actualFlatCodes = actualCodes.slice(0, 6);
+
+    // 验证特码预测
+    const specialEvaluation = PredictionEngine.evaluatePrediction(specialPrediction, actualSpecial);
+
+    // 验证平码预测
+    const flatEvaluation = this.evaluateFlatPrediction(flatPrediction, actualFlatCodes, actualSpecial);
+
+    // 5. 记录规律表现
+    this.recordPatternPerformance(
+      specialPrediction,
+      flatPrediction,
+      actualSpecial,
+      actualFlatCodes,
+      patternPerformance
+    );
+
+    // 6. 自主学习优化
+    const learnResult = await this.learnFromResult(
+      env,
+      specialPrediction,
+      specialEvaluation,
+      actualSpecial,
+      historyUpToTarget,
+      weights
+    );
+
+    return {
+      expect: targetExpect,
+      success: true,
+      specialPrediction,
+      flatPrediction,
+      actualResult: {
+        special: actualSpecial,
+        flatCodes: actualFlatCodes,
+        openCode: targetRecord.open_code
+      },
+      evaluation: {
+        special: specialEvaluation,
+        flat: flatEvaluation,
+        totalScore: (specialEvaluation.totalScore + flatEvaluation.totalScore) / 2
+      },
+      learnResult,
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  /**
+   * 验证平码预测
+   */
+  static evaluateFlatPrediction(prediction, actualFlatCodes, actualSpecial) {
+    const actualAttrs = actualFlatCodes.map(code => Formatter.getAttributes(code));
+
+    // 1. 验证生肖预测
+    const zodiacHits = {
+      main: 0,
+      guard: 0,
+      total: 0
+    };
+
+    const predictedZodiacs = [
+      ...(prediction.flatZodiac?.main || []),
+      ...(prediction.flatZodiac?.guard || [])
+    ];
+
+    actualAttrs.forEach(attr => {
+      if (prediction.flatZodiac?.main?.includes(attr.zodiac)) {
+        zodiacHits.main++;
+        zodiacHits.total++;
+      } else if (prediction.flatZodiac?.guard?.includes(attr.zodiac)) {
+        zodiacHits.guard++;
+        zodiacHits.total++;
+      }
+    });
+
+    // 2. 验证尾数预测
+    const tailHits = {
+      mustHave: 0,
+      highProb: 0,
+      total: 0
+    };
+
+    actualFlatCodes.forEach(code => {
+      const tail = code % 10;
+      if (prediction.flatTail?.mustHave?.includes(tail)) {
+        tailHits.mustHave++;
+        tailHits.total++;
+      } else if (prediction.flatTail?.highProb?.includes(tail)) {
+        tailHits.highProb++;
+        tailHits.total++;
+      }
+    });
+
+    // 3. 验证回避生肖
+    const avoidHit = prediction.flatZodiac?.avoid?.some(zodiac =>
+      actualAttrs.some(attr => attr.zodiac === zodiac)
+    ) ? 0 : 1;
+
+    // 4. 验证特码生肖是否在平码中
+    const specialAttr = Formatter.getAttributes(actualSpecial);
+    const specialInFlat = actualAttrs.some(attr => attr.zodiac === specialAttr.zodiac) ? 0 : 1;
+
+    // 5. 计算总分
+    let totalScore = 0;
+
+    // 生肖分数 (最多40分)
+    totalScore += Math.min(20, zodiacHits.main * 5);
+    totalScore += Math.min(10, zodiacHits.guard * 2);
+
+    // 尾数分数 (最多30分)
+    totalScore += Math.min(15, tailHits.mustHave * 7);
+    totalScore += Math.min(15, tailHits.highProb * 3);
+
+    // 回避分数 (最多10分)
+    totalScore += avoidHit * 5;
+    totalScore += specialInFlat * 5;
+
+    // 分布特征分数 (最多20分)
+    const actualZodiacCount = new Set(actualAttrs.map(attr => attr.zodiac)).size;
+    const actualTailCount = new Set(actualFlatCodes.map(code => code % 10)).size;
+
+    const zodiacCountMatch = Math.abs(actualZodiacCount - 6) <= 1 ? 10 : 5;
+    const tailCountMatch = actualTailCount >= 4 && actualTailCount <= 6 ? 10 : 5;
+
+    totalScore += zodiacCountMatch;
+    totalScore += tailCountMatch;
+
+    return {
+      zodiacHits,
+      tailHits,
+      avoidHit,
+      specialInFlat,
+      zodiacCount: actualZodiacCount,
+      tailCount: actualTailCount,
+      totalScore: Math.min(100, totalScore),
+      grade: this.getGrade(totalScore)
+    };
+  }
+
+  /**
+   * 记录规律表现
+   */
+  static recordPatternPerformance(specialPrediction, flatPrediction, actualSpecial, actualFlatCodes, performanceMap) {
+    // 记录特码预测中应用的规律
+    if (specialPrediction.appliedPatterns) {
+      specialPrediction.appliedPatterns.forEach(pattern => {
+        const key = pattern.patternId;
+        if (!performanceMap.has(key)) {
+          performanceMap.set(key, { hits: 0, total: 0, lastSeen: new Date() });
+        }
+
+        const stats = performanceMap.get(key);
+        stats.total++;
+        stats.lastSeen = new Date();
+
+        // 检查规律是否命中（需要根据规律类型判断）
+        // 这里简化处理，实际需要根据规律的具体条件判断
+      });
+    }
+
+    // 记录平码预测中应用的规律
+    if (flatPrediction.patterns) {
+      flatPrediction.patterns.forEach(pattern => {
+        const key = pattern.patternId;
+        if (!performanceMap.has(key)) {
+          performanceMap.set(key, { hits: 0, total: 0, lastSeen: new Date() });
+        }
+
+        const stats = performanceMap.get(key);
+        stats.total++;
+        stats.lastSeen = new Date();
+      });
+    }
+  }
+
+  /**
+   * 从结果中学习
+   */
+  static async learnFromResult(env, prediction, evaluation, actualSpecial, history, weights) {
+    const actualAttr = Formatter.getAttributes(actualSpecial);
+
+    // 检查预测是否准确
+    if (!evaluation.zodiacHit.main && !evaluation.zodiacHit.guard) {
+      // 预测失败，分析原因
+      const lastRecord = history[0];
+      const lastSpecial = parseInt(lastRecord.open_code.split(",")[6]);
+      const lastAttr = Formatter.getAttributes(lastSpecial);
+
+      const determinants = MathEngine.analyzeDeterminants(history);
+
+      // 分析失败原因并调整权重
+      let adjustments = {};
+
+      // 检查马尔可夫关联性
+      const transitions = determinants.transitionMatrix[lastAttr.zodiac] || {};
+      const transCount = transitions[actualAttr.zodiac] || 0;
+      const totalTransitions = Object.values(transitions).reduce((a, b) => a + b, 0);
+
+      if (transCount > 0 && totalTransitions > 0) {
+        const transProb = transCount / totalTransitions;
+        if (transProb > 0.2) {
+          adjustments.w_markov = 0.1;
+        }
+      }
+
+      // 检查遗漏值
+      const omission = determinants.omission[actualAttr.zodiac] || 0;
+      if (omission > 15) {
+        adjustments.w_omission = 0.15;
+      }
+
+      // 检查生肖关系
+      if (CONFIG.RELATIONS.LIU_HE[lastAttr.zodiac] === actualAttr.zodiac) {
+        adjustments.w_relation = 0.1;
+      } else if (CONFIG.RELATIONS.SAN_HE[lastAttr.zodiac]?.includes(actualAttr.zodiac)) {
+        adjustments.w_relation = 0.05;
+      }
+
+      // 应用调整
+      Object.keys(adjustments).forEach(key => {
+        if (weights[key] !== undefined) {
+          weights[key] = parseFloat((weights[key] + adjustments[key]).toFixed(2));
+          weights[key] = Math.max(0.1, Math.min(5.0, weights[key]));
+        }
+      });
+
+      // 保存权重
+      if (Object.keys(adjustments).length > 0) {
+        await DB.saveWeights(env, weights);
+        return { adjusted: true, adjustments };
+      }
+    }
+
+    return { adjusted: false };
+  }
+
+  /**
+   * 生成总结报告
+   */
+  static async generateSummary(results, allHistory, startIndex, endIndex, patternPerformance, weights) {
+    const successfulResults = results.filter(r => r.success);
+    const totalPeriods = startIndex - endIndex + 1;
+
+    if (successfulResults.length === 0) {
+      return "没有成功的复盘结果";
+    }
+
+    // 1. 统计得分
+    const specialScores = successfulResults.map(r => r.evaluation?.special?.totalScore || 0);
+    const flatScores = successfulResults.map(r => r.evaluation?.flat?.totalScore || 0);
+    const totalScores = successfulResults.map(r => r.evaluation?.totalScore || 0);
+
+    const avgSpecialScore = this.calculateAverage(specialScores);
+    const avgFlatScore = this.calculateAverage(flatScores);
+    const avgTotalScore = this.calculateAverage(totalScores);
+
+    // 2. 统计命中率
+    const zodiacHitRate = this.calculateHitRate(
+      successfulResults,
+      r => r.evaluation?.special?.zodiacHit?.main || false
+    );
+
+    const colorHitRate = this.calculateHitRate(
+      successfulResults,
+      r => r.evaluation?.special?.colorHit?.main || false
+    );
+
+    const flatZodiacHitRate = this.calculateAverage(
+      successfulResults.map(r => {
+        const hits = r.evaluation?.flat?.zodiacHits?.total || 0;
+        return hits / 6; // 6个平码
+      })
+    );
+
+    // 3. 规律表现分析
+    const patternStats = Array.from(patternPerformance.entries())
+      .map(([patternId, stats]) => ({
+        patternId,
+        hitRate: stats.total > 0 ? stats.hits / stats.total : 0,
+        total: stats.total,
+        lastSeen: stats.lastSeen
+      }))
+      .sort((a, b) => b.hitRate - a.hitRate)
+      .slice(0, 10);
+
+    // 4. 权重变化分析
+    const weightChanges = {};
+    Object.keys(weights).forEach(key => {
+      if (!key.startsWith('_')) {
+        weightChanges[key] = weights[key];
+      }
+    });
+
+    // 5. 生成报告
+    const summary = {
+      range: {
+        start: allHistory[startIndex].expect,
+        end: allHistory[endIndex].expect,
+        totalPeriods: totalPeriods,
+        successfulPeriods: successfulResults.length
+      },
+      scores: {
+        avgSpecialScore: avgSpecialScore.toFixed(1),
+        avgFlatScore: avgFlatScore.toFixed(1),
+        avgTotalScore: avgTotalScore.toFixed(1),
+        maxSpecialScore: Math.max(...specialScores).toFixed(0),
+        minSpecialScore: Math.min(...specialScores).toFixed(0),
+        maxFlatScore: Math.max(...flatScores).toFixed(0),
+        minFlatScore: Math.min(...flatScores).toFixed(0)
+      },
+      hitRates: {
+        zodiac: (zodiacHitRate * 100).toFixed(1) + '%',
+        color: (colorHitRate * 100).toFixed(1) + '%',
+        flatZodiac: (flatZodiacHitRate * 100).toFixed(1) + '%'
+      },
+      patternPerformance: patternStats,
+      weights: weightChanges,
+      learnCount: successfulResults.filter(r => r.learnResult?.adjusted).length,
+      generatedAt: new Date().toISOString()
+    };
+
+    return summary;
+  }
+
+  /**
+   * 计算平均值
+   */
+  static calculateAverage(numbers) {
+    if (numbers.length === 0) return 0;
+    return numbers.reduce((a, b) => a + b, 0) / numbers.length;
+  }
+
+  /**
+   * 计算命中率
+   */
+  static calculateHitRate(results, checkFn) {
+    if (results.length === 0) return 0;
+    const hits = results.filter(checkFn).length;
+    return hits / results.length;
+  }
+
+  /**
+   * 获取等级
+   */
+  static getGrade(score) {
+    if (score >= 80) return "S";
+    if (score >= 70) return "A";
+    if (score >= 60) return "B";
+    if (score >= 50) return "C";
+    if (score >= 40) return "D";
+    return "F";
+  }
+}
+
+// ==============================================================================
 // 6. 消息渲染器 (UI Renderer) - 完整修复版
 // ==============================================================================
 
@@ -2226,6 +5563,200 @@ ${learnMsg}
     `.trim();
   }
 }
+
+// ==============================================================================
+// 6.6 消息渲染器扩展 (Message Renderer Extensions)
+// ==============================================================================
+
+Object.assign(MessageRenderer, {
+  /**
+   * 渲染平码预测
+   */
+  renderFlatPrediction(prediction) {
+    const zodiacList = prediction.flatZodiac?.main?.join(" ") || "待计算";
+    const guardZodiacList = prediction.flatZodiac?.guard?.join(" ") || "待计算";
+    const avoidZodiacList = prediction.flatZodiac?.avoid?.join(" ") || "无";
+
+    const mustHaveTails = prediction.flatTail?.mustHave?.join(", ") || "待计算";
+    const highProbTails = prediction.flatTail?.highProb?.join(", ") || "待计算";
+    const combinations = prediction.flatTail?.combinations?.join(" | ") || "待计算";
+
+    return `
+🎯 <b>平码特征预测</b> (第 ${prediction.nextExpect} 期)
+────────────────
+<b>🐭 平码生肖推荐</b>
+${CONFIG.EMOJI.fire} 主推生肖: [ ${zodiacList} ]
+${CONFIG.EMOJI.shield} 防守生肖: [ ${guardZodiacList} ]
+${avoidZodiacList !== "无" ? `${CONFIG.EMOJI.warning} 回避生肖: [ ${avoidZodiacList} ]` : ''}
+
+<b>🔢 平码尾数特征</b>
+${CONFIG.EMOJI.fire} 必出尾数: [ ${mustHaveTails} ]
+${CONFIG.EMOJI.shield} 高概率尾数: [ ${highProbTails} ]
+📊 尾数组合建议: ${combinations}
+
+<b>📈 分布特征参考</b>
+• 生肖数量: ${prediction.distribution?.zodiacCount || "5-6个"}
+• 尾数数量: ${prediction.distribution?.tailCount || "4-6个"}
+• 大小比例: ${prediction.distribution?.bigSmallRatio || "约3:3"}
+• 奇偶比例: ${prediction.distribution?.oddEvenRatio || "约3:3"}
+${prediction.distribution?.specialInFlatRate ? `• 特码在平码概率: ${(prediction.distribution.specialInFlatRate * 100).toFixed(1)}%` : ''}
+
+${prediction.patterns && prediction.patterns.length > 0 ? `
+<b>🧠 规律依据 (Top 3)</b>
+${prediction.patterns.slice(0, 3).map(p => `• ${p.patternName || p.description} (${(p.confidence * 100).toFixed(0)}%)`).join('\n')}
+` : ''}
+────────────────
+${CONFIG.EMOJI.chart} <b>综合置信度</b>: ${prediction.confidence || 0}%
+${CONFIG.EMOJI.bot} <b>算法版本</b>: ${prediction.algorithmVersion || "V5.0"}
+${CONFIG.EMOJI.clock} <b>生成时间</b>: ${new Date(prediction.generatedAt).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}
+    `.trim();
+  },
+
+  /**
+   * 渲染规律库
+   */
+  renderPatternLibrary(patterns, currentPage, totalPages, totalPatterns, filter = "all") {
+    const filterNames = {
+      all: "全部",
+      zodiac: "生肖规律",
+      tail: "尾数规律",
+      color: "波色规律",
+      flat: "平码规律"
+    };
+
+    let message = `📚 <b>规律特征库</b>\n`;
+    message += `筛选: ${filterNames[filter] || filter} | 第 ${currentPage}/${totalPages} 页\n`;
+    message += `总计: ${totalPatterns} 条规律\n`;
+    message += `────────────────\n`;
+
+    if (patterns.length === 0) {
+      message += `当前筛选条件下无规律。\n`;
+    } else {
+      patterns.forEach((pattern, index) => {
+        const rank = (currentPage - 1) * 5 + index + 1;
+        const confidence = (pattern.statistics?.confidence * 100).toFixed(1);
+        const activeStatus = pattern.application?.isActive ? '✅' : '❌';
+        const priority = pattern.application?.priority || 5;
+
+        message += `${rank}. <b>${pattern.patternName}</b> ${activeStatus}\n`;
+        message += `   📝 ${pattern.description}\n`;
+        message += `   🎯 置信度: ${confidence}% | 优先级: ${priority}\n`;
+        message += `   📊 出现: ${pattern.statistics?.totalOccurrences || 0}次 | 命中: ${pattern.statistics?.hitCount || 0}次\n`;
+
+        if (pattern.statistics?.recentPerformance) {
+          message += `   📈 近期: ${(pattern.statistics.recentPerformance * 100).toFixed(1)}%\n`;
+        }
+
+        message += `   🆔 ${pattern.patternId}\n\n`;
+      });
+    }
+
+    message += `────────────────\n`;
+    message += `<b>💡 使用说明</b>\n`;
+    message += `• 点击规律名称可查看详情\n`;
+    message += `• 使用按钮翻页和筛选\n`;
+    message += `• 发送"规律库 刷新"重新发现规律\n`;
+    message += `• 发送"规律启用/停用 ID"管理规律\n`;
+    message += `────────────────\n`;
+    message += `${CONFIG.EMOJI.clock} <b>更新时间</b>: ${Formatter.formatBeijingTime()}`;
+
+    return message;
+  },
+
+  /**
+   * 渲染批量复盘总结
+   */
+  renderBatchSummary(summary) {
+    if (typeof summary === 'string') {
+      return summary;
+    }
+
+    let message = `📈 <b>批量复盘总结报告</b>\n`;
+    message += `────────────────\n`;
+
+    // 范围信息
+    message += `<b>📅 复盘范围</b>\n`;
+    message += `${summary.range.start} - ${summary.range.end}\n`;
+    message += `总期数: ${summary.range.totalPeriods}期\n`;
+    message += `成功复盘: ${summary.range.successfulPeriods}期\n`;
+    message += `────────────────\n`;
+
+    // 得分统计
+    message += `<b>📊 得分统计</b>\n`;
+    message += `特码平均分: ${summary.scores.avgSpecialScore}分\n`;
+    message += `平码平均分: ${summary.scores.avgFlatScore}分\n`;
+    message += `综合平均分: ${summary.scores.avgTotalScore}分\n`;
+    message += `最高特码分: ${summary.scores.maxSpecialScore}分\n`;
+    message += `最低特码分: ${summary.scores.minSpecialScore}分\n`;
+    message += `────────────────\n`;
+
+    // 命中率统计
+    message += `<b>🎯 命中率统计</b>\n`;
+    message += `特码生肖命中: ${summary.hitRates.zodiac}\n`;
+    message += `特码波色命中: ${summary.hitRates.color}\n`;
+    message += `平码生肖命中: ${summary.hitRates.flatZodiac}\n`;
+    message += `────────────────\n`;
+
+    // 规律表现
+    if (summary.patternPerformance && summary.patternPerformance.length > 0) {
+      message += `<b>🏆 Top 5 规律表现</b>\n`;
+      summary.patternPerformance.slice(0, 5).forEach((pattern, index) => {
+        message += `${index + 1}. ${pattern.patternId.substring(0, 20)}...\n`;
+        message += `   命中率: ${(pattern.hitRate * 100).toFixed(1)}% (${pattern.total}次)\n`;
+      });
+      message += `────────────────\n`;
+    }
+
+    // 权重变化
+    if (summary.weights) {
+      message += `<b>⚖️ 权重参数</b>\n`;
+      Object.entries(summary.weights).forEach(([key, value]) => {
+        if (!key.startsWith('_')) {
+          message += `${key}: ${value.toFixed(2)}\n`;
+        }
+      });
+      message += `────────────────\n`;
+    }
+
+    // 学习统计
+    message += `<b>🧠 学习统计</b>\n`;
+    message += `算法调整次数: ${summary.learnCount || 0}次\n`;
+    message += `────────────────\n`;
+
+    message += `${CONFIG.EMOJI.clock} <b>报告时间</b>: ${new Date(summary.generatedAt).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`;
+
+    return message;
+  },
+
+  /**
+   * 渲染批量复盘进度
+   */
+  renderBatchProgress(taskId, progress, current, total, latestResult) {
+    const progressBar = Formatter.generateProgressBar(progress, 1, 20);
+    const percent = (progress * 100).toFixed(1);
+
+    let message = `⏳ <b>批量复盘进行中</b>\n`;
+    message += `任务ID: <code>${taskId}</code>\n`;
+    message += `────────────────\n`;
+    message += `${progressBar} ${percent}%\n`;
+    message += `进度: ${current}/${total}期\n`;
+    message += `────────────────\n`;
+
+    if (latestResult) {
+      message += `<b>最新结果</b>\n`;
+      message += `期号: ${latestResult.expect}\n`;
+      message += `特码得分: ${latestResult.evaluation?.special?.totalScore || 0}分\n`;
+      message += `平码得分: ${latestResult.evaluation?.flat?.totalScore || 0}分\n`;
+      message += `等级: ${latestResult.evaluation?.special?.grade || 'N/A'}\n`;
+    }
+
+    message += `────────────────\n`;
+    message += `预计剩余: ${Math.ceil((total - current) * 0.5)}秒\n`;
+    message += `${CONFIG.EMOJI.clock} 更新时间: ${Formatter.formatBeijingTime()}`;
+
+    return message;
+  }
+});
 
 // ==============================================================================
 // 7. 外部接口封装 (External Integrations) - 完整修复版
@@ -3756,7 +7287,7 @@ async function handleCallback(env, query) {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   
-  Logger.info("Callback", `收到回调: ${data}`, { chatId, messageId });
+  Logger.info("Callback", `收到回调: ${data}, chatId: ${chatId}, messageId: ${messageId}`);
   
   // 立即响应回调，防止超时
   try {
@@ -3790,10 +7321,39 @@ async function handleCallback(env, query) {
       const page = parseInt(data.replace('history_page_', ''));
       await Controller.handleHistory(env, chatId, page, messageId);
       
+    } else if (data.startsWith('pattern_page_')) {
+      // 规律库翻页
+      const match = data.match(/pattern_page_(\d+)_(\w+)/);
+      if (match) {
+        const page = parseInt(match[1]);
+        const filter = match[2];
+        await Controller.handlePatternLibrary(env, chatId, page, filter);
+      }
+
+    } else if (data.startsWith('pattern_filter_')) {
+      // 规律库筛选
+      const filter = data.replace('pattern_filter_', '');
+      await Controller.handlePatternLibrary(env, chatId, 1, filter);
+
+    } else if (data === 'pattern_refresh') {
+      // 刷新规律库
+      await Controller.handlePatternDiscovery(env, chatId);
+
+    } else if (data === 'pattern_stats') {
+      // 规律统计
+      await ExternalService.sendMessage(env, chatId,
+        `📊 <b>规律统计功能开发中...</b>\n\n` +
+        `该功能将在后续版本中提供。`
+      );
+
     } else if (data === 'back_to_menu') {
       // 返回菜单
       await ExternalService.sendMessage(env, chatId, `📂 <b>${CONFIG.SYSTEM.NAME}</b> 主菜单`, KEYBOARDS.MAIN_MENU);
       
+    } else if (data === 'flat_prediction') {
+      // 平码预测
+      await Controller.handleFlatPrediction(env, chatId);
+
     } else {
       // 未知回调
       await ExternalService.answerCallbackQuery(env, query.id, "未知操作", true);
@@ -3846,6 +7406,69 @@ async function handleUpdate(env, payload, ctx) {
   
   // 6. 命令路由
   
+  // --- 批量复盘指令 ---
+  if (text.startsWith("批量复盘")) {
+    const match1 = text.match(/批量复盘\s+(\d+)\s+(\d+)/);
+    const match2 = text.match(/批量复盘\s+最近\s*(\d+)\s*期/);
+
+    if (match1) {
+      const [, start, end] = match1;
+      const taskInfo = await Controller.handleBatchBacktest(env, chatId, start, end);
+      if (taskInfo) {
+        ctx.waitUntil(Controller.executeBatchBacktestTask(env, chatId, taskInfo, ctx));
+      }
+    } else if (match2) {
+      const [, n] = match2;
+      const taskInfo = await Controller.handleBatchBacktest(env, chatId, "最近", n);
+      if (taskInfo) {
+        ctx.waitUntil(Controller.executeBatchBacktestTask(env, chatId, taskInfo, ctx));
+      }
+    } else {
+      await ExternalService.sendMessage(env, chatId,
+        "❌ <b>批量复盘格式错误</b>\n\n" +
+        "请使用:\n" +
+        "<code>批量复盘 起始期号 结束期号</code>\n" +
+        "例如: <code>批量复盘 2024001 2024120</code>\n\n" +
+        "或:\n" +
+        "<code>批量复盘 最近N期</code>\n" +
+        "例如: <code>批量复盘 最近50期</code>"
+      );
+    }
+    return;
+  }
+
+  // --- 平码预测指令 ---
+  if (text.includes("平码预测") || text === BTNS.FLAT_PREDICT) {
+    await Controller.handleFlatPrediction(env, chatId);
+    return;
+  }
+
+  // --- 规律库指令 ---
+  if (text.startsWith("规律库")) {
+    const match = text.match(/规律库\s*(\d*)/);
+    const page = match && match[1] ? parseInt(match[1]) : 1;
+
+    if (text.includes("刷新")) {
+      await Controller.handlePatternDiscovery(env, chatId);
+    } else if (text.includes("启用") || text.includes("停用")) {
+      const actionMatch = text.match(/规律库\s+(启用|停用)\s+(\S+)/);
+      if (actionMatch) {
+        const action = actionMatch[1];
+        const patternId = actionMatch[2];
+        await Controller.handlePatternToggle(env, chatId, patternId, action === '启用');
+      }
+    } else {
+      await Controller.handlePatternLibrary(env, chatId, page);
+    }
+    return;
+  }
+
+  // --- 规律发现指令 ---
+  if (text === BTNS.PATTERN_DISCOVERY) {
+    await Controller.handlePatternDiscovery(env, chatId, ctx);
+    return;
+  }
+
   // --- 复盘回测指令 ---
   if (text.startsWith("复盘")) {
     const match = text.match(/复盘\s*(\d+)/);
